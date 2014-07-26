@@ -32,7 +32,7 @@ import (
 // one index is based on the the Name field.
 func ExampleDbType_01() {
 	type recType struct {
-		ID   int64  `db_table:"rec"`
+		ID   int64  `db_primary:"*" db_table:"rec"`
 		Name string `db:"*" db_index:"*"`
 	}
 	db := dbmap.DbCreate("data/example.db")
@@ -57,7 +57,7 @@ func ExampleDbType_01() {
 // This example demonstrates the use of blobs in dbmap.
 func ExampleDbType_02() {
 	type recType struct {
-		ID      int64  `db_table:"image"`
+		ID      int64  `db_primary:"*" db_table:"image"`
 		Img     []byte `db:"*"`
 		FileStr string `db:"*"`
 	}
@@ -106,7 +106,7 @@ func ExampleDbType_02() {
 func ExampleDbType_03() {
 	dbFileStr := "data/example.db"
 	type recType struct {
-		ID   int64  `db_table:"rec"`
+		ID   int64  `db_primary:"*" db_table:"rec"`
 		Name string `db:"last_name"`
 		Num  int64  `db:"group_num"`
 		Val  int    // exported but not managed by db
@@ -144,7 +144,7 @@ func ExampleDbType_03() {
 // only fields B and C are updated. In the second call, all fields are updated.
 func ExampleDbType_04() {
 	type recType struct {
-		ID      int64 `db_table:"rec"`
+		ID      int64 `db_primary:"*" db_table:"rec"`
 		A, B, C int64 `db:"*"`
 	}
 	var rec recType
@@ -194,7 +194,7 @@ func ExampleDbType_04() {
 // This example demonstrates record deletion.
 func ExampleDbType_05() {
 	type recType struct {
-		ID      int64 `db_table:"rec"`
+		ID      int64 `db_primary:"*" db_table:"rec"`
 		A, B, C int64 `db:"*"`
 	}
 	db := dbmap.DbCreate("data/example.db")
@@ -235,7 +235,7 @@ func ExampleDbType_05() {
 // This example demonstrates table truncation.
 func ExampleDbType_06() {
 	type recType struct {
-		ID      int64 `db_table:"rec"`
+		ID      int64 `db_primary:"*" db_table:"rec"`
 		A, B, C int64 `db:"*"`
 	}
 	db := dbmap.DbCreate("data/example.db")
@@ -275,7 +275,7 @@ func ExampleDbType_06() {
 func ExampleDbType_07() {
 	dbFileStr := "data/example.db"
 	type recType struct {
-		ID      int64 `db_table:"sample"`
+		ID      int64 `db_primary:"*" db_table:"sample"`
 		A, B, C int64 `db:"*"`
 	}
 	os.Remove(dbFileStr)
@@ -308,7 +308,7 @@ func ExampleDbType_07() {
 // the go cover tool.
 func ExampleDbType_08() {
 	type recType struct {
-		ID      int64 `db_table:"rec"`
+		ID      int64 `db_primary:"*" db_table:"rec"`
 		A, B, C int64 `db:"*"`
 	}
 	var db *dbmap.DbType
@@ -361,13 +361,13 @@ func ExampleDbType_08() {
 	db.Trace(false)
 	report()
 	type aType struct {
-		ID  bool  `db_table:"a"`
+		ID  bool  `db_primary:"*" db_table:"a"`
 		Val int64 `db:"*"`
 	}
 	db.TableCreate(&aType{})
 	report()
 	type bType struct {
-		ID  int64 `db_table:"b"`
+		ID  int64 `db_primary:"*" db_table:"b"`
 		Val int64
 	}
 	db.TableCreate(&bType{})
@@ -378,14 +378,14 @@ func ExampleDbType_08() {
 	db.TableCreate(&a)
 	report()
 	type cType struct {
-		ID  int64        `db_table:"b"`
+		ID  int64        `db_primary:"*" db_table:"b"`
 		Hnd dbmap.DbType `db:"*"`
 	}
 	db.TableCreate(&cType{})
 	report()
 	type dType struct {
-		ID1 int64 `db_table:"d1"`
-		ID2 int64 `db_table:"d2"`
+		ID1 int64 `db_primary:"*" db_table:"d1"`
+		ID2 int64 `db_primary:"*" db_table:"d2"`
 		Val int64 `db:"*"`
 	}
 	db.TableCreate(&dType{})
@@ -394,6 +394,20 @@ func ExampleDbType_08() {
 		Val int64 `db:"*"`
 	}
 	db.TableCreate(&eType{})
+	report()
+	type fType struct {
+		ID  int64 `db_primary:"*" db_table:"f1"`
+		Val int64 `db:"*" db_table:"f2"`
+	}
+	db.TableCreate(&fType{})
+	report()
+	type gType struct {
+		Val1 int64 `db:"*" db_table:"g"`
+		Val2 int64 `db:"*"`
+	}
+	g := gType{1, 2}
+	db.TableCreate(&g)
+	db.Insert([]gType{g})
 	report()
 	// Output:
 	// application error
@@ -411,6 +425,8 @@ func ExampleDbType_08() {
 	// expecting record pointer, got int
 	// specified address must be of structure with one or more fields that have a "db" tag
 	// database does not support fields of type dbmap.DbType
-	// multiple occurrence of "db_table" tag
+	// multiple occurrence of "db_primary" tag
 	// missing "db_table" tag
+	// multiple occurrence of "db_table" tag
+	// primary key is required but is not present in structure
 }

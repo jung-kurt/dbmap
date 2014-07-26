@@ -53,11 +53,12 @@ type idxType struct {
 }
 
 type dscType struct {
-	tblStr  string
-	idSf    reflect.StructField
-	recTp   reflect.Type
-	nameMap map[string]reflect.StructField // {"num":@, "name":@, ...}
-	create  struct {
+	tblStr    string                         // Name of database table
+	idPresent bool                           // Primary key is present in table
+	idSf      reflect.StructField            // Descriptor for primary key
+	recTp     reflect.Type                   // Record interface
+	nameMap   map[string]reflect.StructField // {"num":@, "name":@, ...}
+	create    struct {
 		nameTypeStr string    // "num int32, name string, ..."
 		idxList     []idxType // {{"fooID", "rowid"}, {"fooName", "Name"}, {"fooNum", "Num"}, ...}
 	}
@@ -113,7 +114,7 @@ func (db *DbType) SetError(err error) {
 			// Take the opportunity here to exercise some trivial code paths that cannot
 			// be tested externally
 			_ = prePad("")
-			_ = db.dscFromType(reflect.TypeOf(err))
+			_ = db.dscFromType(reflect.TypeOf(err), true)
 			db.tested = true
 		}
 	}
@@ -207,9 +208,9 @@ func (db *DbType) Close() {
 // character flag indicating whether the command was cached (C), whether a
 // transaction is pending (T), and whether an error has occurred (E).
 func (db *DbType) Trace(on bool) {
-	if db.err == nil {
-		db.trace = on
-	}
+	// why? if db.err == nil {
+	db.trace = on
+	// }
 }
 
 // TransactBegin begins a new transaction. This function is typically not
@@ -365,7 +366,7 @@ func idxListAppend(listPtr *[]idxType, nameStr, fldStr string) {
 
 // dscFromType collects meta information, for example field types and SQL
 // names, from the passed-in record.
-func (db *DbType) dscFromType(recTp reflect.Type) (dsc dscType) {
+func (db *DbType) dscFromType(recTp reflect.Type, primaryKeyRequired bool) (dsc dscType) {
 	if db.err != nil {
 		return
 	}
@@ -375,7 +376,7 @@ func (db *DbType) dscFromType(recTp reflect.Type) (dsc dscType) {
 		if !ok {
 			dsc.recTp = recTp
 			var sfList []reflect.StructField
-			var sqlStr, tblStr, typeStr string
+			var primaryStr, sqlStr, tblStr, typeStr string
 			var fldTp reflect.Type
 			var selList, qmList, createList []string
 			dsc.nameMap = make(map[string]reflect.StructField)
@@ -387,7 +388,7 @@ func (db *DbType) dscFromType(recTp reflect.Type) (dsc dscType) {
 				if db.err == nil {
 					indexed = len(sf.Tag.Get("db_index")) > 0
 					// Note on indexes. In the future, if this package gains support for
-					// multi-field indexes, the ql_index tag can have strings such as "a+01",
+					// multi-field indexes, the db_index tag can have strings such as "a+01",
 					// "a-02", etc. Here, "a" will be the index, the sort order of the key
 					// segment will be specified by "-" (descending) or "+" (ascending) and
 					// the significance of the key will be determined by sorting the following
@@ -416,18 +417,28 @@ func (db *DbType) dscFromType(recTp reflect.Type) (dsc dscType) {
 							db.SetErrorf("database does not support fields of type %s", fldTp.String())
 						}
 					} else {
-						tblStr = sf.Tag.Get("db_table")
-						if len(tblStr) > 0 {
-							if len(dsc.tblStr) == 0 {
+						primaryStr = sf.Tag.Get("db_primary")
+						if len(primaryStr) > 0 {
+							if !dsc.idPresent {
 								if fldTp.Kind() == reflect.Int64 {
-									strListAppend(&selList, "rowid")
+									strListAppend(&selList, "rowid") // Warning: SQLite3ism
 									dsc.sel.sfList = append(dsc.sel.sfList, sf)
 									strListAppend(&dsc.sel.typeStrList, "%v", sf.Type.Kind())
-									dsc.tblStr = tblStr
 									dsc.idSf = sf
+									dsc.idPresent = true
 								} else {
 									db.SetErrorf("expecting int64 for id, got %v", fldTp.Kind())
 								}
+							} else {
+								db.SetErrorf(`multiple occurrence of "db_primary" tag`)
+							}
+						}
+					}
+					if db.err == nil {
+						tblStr = sf.Tag.Get("db_table")
+						if len(tblStr) > 0 {
+							if len(dsc.tblStr) == 0 {
+								dsc.tblStr = tblStr
 							} else {
 								db.SetErrorf(`multiple occurrence of "db_table" tag`)
 							}
@@ -450,6 +461,9 @@ func (db *DbType) dscFromType(recTp reflect.Type) (dsc dscType) {
 				}
 			}
 		}
+		if primaryKeyRequired && !dsc.idPresent {
+			db.SetErrorf(`primary key is required but is not present in structure`)
+		}
 	} else {
 		db.SetErrorf(`specified address must be of structure with ` +
 			`one or more fields that have a "db" tag`)
@@ -459,11 +473,11 @@ func (db *DbType) dscFromType(recTp reflect.Type) (dsc dscType) {
 
 // Function dsc collects meta information, for example field types and SQL
 // names, from the passed-in record.
-func (db *DbType) dscFromPtr(recPtr interface{}) (dsc dscType) {
+func (db *DbType) dscFromPtr(recPtr interface{}, primaryKeyRequired bool) (dsc dscType) {
 	ptrVl := reflect.ValueOf(recPtr)
 	kd := ptrVl.Kind()
 	if kd == reflect.Ptr {
-		return db.dscFromType(ptrVl.Elem().Type())
+		return db.dscFromType(ptrVl.Elem().Type(), primaryKeyRequired)
 	}
 	db.SetErrorf("expecting record pointer, got %v", kd)
 	return
@@ -488,14 +502,18 @@ func (db *DbType) TableCreate(recPtr interface{}) {
 	// CREATE INDEX fooID ON foo (rowid);
 	// CREATE INDEX fooDate ON foo (Date);
 	var dsc dscType
-	dsc = db.dscFromPtr(recPtr)
+	// fmt.Printf("Trace 1 %v\n", db.trace)
+	dsc = db.dscFromPtr(recPtr, false)
 	if db.err == nil {
+		// fmt.Printf("Trace 2 %v\n", db.trace)
 		// Consider supporting flag that controls how existing table is handled
 		// (function fail or table overwritten)
 		// db.TransactBegin()
 		if db.err == nil {
+			// fmt.Printf("Trace 3 %v\n", db.trace)
 			cmd := fmt.Sprintf("DROP TABLE IF EXISTS %s;", dsc.tblStr)
 			_ = db.Exec(cmd)
+			// fmt.Printf("Trace 4 %v\n", db.trace)
 			for _, idx := range dsc.create.idxList {
 				cmd = fmt.Sprintf("DROP INDEX IF EXISTS %s%s;", dsc.tblStr, idx.nameStr)
 				_ = db.Exec(cmd)
@@ -533,7 +551,7 @@ func (db *DbType) Update(recPtr interface{}, fldNames ...string) {
 	// UPDATE foo SET name = ?, num = ? WHERE rowid = ?;
 	if len(fldNames) > 0 {
 		var dsc dscType
-		dsc = db.dscFromPtr(recPtr)
+		dsc = db.dscFromPtr(recPtr, true)
 		if db.err == nil {
 			recVl := reflect.ValueOf(recPtr).Elem()
 			addr := recVl.UnsafeAddr()
@@ -578,7 +596,7 @@ func (db *DbType) Delete(recPtr interface{}, tailStr string, prms ...interface{}
 	}
 	// DELETE FROM foo WHERE a > ? AND b < ?
 	var dsc dscType
-	dsc = db.dscFromPtr(recPtr)
+	dsc = db.dscFromPtr(recPtr, false)
 	if db.err == nil {
 		db.TransactBegin()
 		if db.err == nil {
@@ -597,7 +615,7 @@ func (db *DbType) Truncate(recPtr interface{}) {
 	}
 	// DELETE FROM foo;
 	var dsc dscType
-	dsc = db.dscFromPtr(recPtr)
+	dsc = db.dscFromPtr(recPtr, false)
 	if db.err == nil {
 		db.TransactBegin()
 		if db.err == nil {
@@ -625,7 +643,7 @@ func (db *DbType) Insert(slice interface{}) {
 	if sliceTp.Kind() == reflect.Slice {
 		count := sliceVl.Len()
 		recTp := sliceTp.Elem()
-		dsc = db.dscFromType(recTp)
+		dsc = db.dscFromType(recTp, true)
 		if db.err == nil {
 			cmdStr := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s);",
 				dsc.tblStr, dsc.insert.nameStr, dsc.insert.qmStr)
@@ -669,11 +687,10 @@ func (db *DbType) Retrieve(slicePtr interface{}, tailStr string, prms ...interfa
 		if kd == reflect.Slice {
 			sliceTp := sliceVl.Type()
 			recTp := sliceTp.Elem()
-			dsc = db.dscFromType(recTp)
+			dsc = db.dscFromType(recTp, false)
 			if db.err == nil {
 				cmdStr := fmt.Sprintf("SELECT %s FROM %s%s;",
 					dsc.sel.nameStr, dsc.tblStr, prePad(tailStr))
-				// fmt.Printf("dbmap [%s]\n", cmdStr)
 				var rows *sql.Rows
 				rows = db.Query(cmdStr, prms...)
 				if db.err == nil {
