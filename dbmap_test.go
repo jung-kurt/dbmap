@@ -26,11 +26,10 @@ import (
 	"os"
 )
 
-// This example demonstrates a simple use of dbmap. Note the use of Go slice
-// and comparison expressions in the WHERE clause. Also note that replacement
-// parameters use a one-based index to access parameters that follow the clause
-// in the call to Retrieve(). The "db_index" tag is used to index the table by
-// the associated field. Here, one index is based on the the Name field.
+// This example demonstrates a simple use of dbmap. In the call to Retrieve(),
+// each question mark is replaced with a quoted and escaped expression result.
+// The "db_index" tag is used to index the table by the associated field. Here,
+// one index is based on the the Name field.
 func ExampleDbType_01() {
 	type recType struct {
 		ID   int64  `db_table:"rec"`
@@ -38,9 +37,6 @@ func ExampleDbType_01() {
 	}
 	db := dbmap.DbCreate("data/example.db")
 	db.TableCreate(&recType{})
-	if db.Err() {
-		fmt.Println(db.Error())
-	}
 	db.Insert([]recType{{0, "Athos"}, {0, "Porthos"}, {0, "Aramis"}})
 	var list []recType
 	db.Retrieve(&list, "WHERE Name LIKE ? ORDER BY Name", "A%")
@@ -89,7 +85,7 @@ func ExampleDbType_02() {
 		fmt.Println(err)
 	}
 	// Output:
-	// dbmap.jpg, SHA1: [134 36 185 180 116 197 118 243 84 169 19 135 182 155 151 51 251 84 111 175], length: 2685
+	// dbmap.jpg, SHA1: [25 171 91 242 2 67 216 162 57 97 225 97 3 26 37 177 213 194 45 59], length: 3780
 }
 
 // This example demonstrates the reopening of a db database.
