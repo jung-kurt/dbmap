@@ -44,11 +44,15 @@ a table within that database, and subsequent operations.
 		ID   int64  `db_table:"rec"`
 		Name string `db:"*" db_index:"*"`
 	}
-	db := DbCreate("data/simple.db")
+	db := dbmap.DbCreate("data/example.db")
 	db.TableCreate(&recType{})
+	if db.Err() {
+		fmt.Println(db.Error())
+	}
 	db.Insert([]recType{{0, "Athos"}, {0, "Porthos"}, {0, "Aramis"}})
 	var list []recType
-	db.Retrieve(&list, "WHERE Name[0:1] == ?1", "A")
+	db.Retrieve(&list, "WHERE Name LIKE ? ORDER BY Name", "A%")
+	fmt.Println(db)
 	for _, r := range list {
 		fmt.Println(r.Name)
 	}
