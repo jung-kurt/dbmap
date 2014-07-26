@@ -46,9 +46,6 @@ a table within that database, and subsequent operations.
 	}
 	db := dbmap.DbCreate("data/example.db")
 	db.TableCreate(&recType{})
-	if db.Err() {
-		fmt.Println(db.Error())
-	}
 	db.Insert([]recType{{0, "Athos"}, {0, "Porthos"}, {0, "Aramis"}})
 	var list []recType
 	db.Retrieve(&list, "WHERE Name LIKE ? ORDER BY Name", "A%")
@@ -57,6 +54,9 @@ a table within that database, and subsequent operations.
 		fmt.Println(r.Name)
 	}
 	db.Close()
+	if db.Err() {
+		fmt.Println(db.Error())
+	}
 
 In this example, the field tag "db_table" identifies the name of the table in
 which to store records of this type. It is associated with the int64 ID that is
