@@ -76,7 +76,8 @@ type dscType struct {
 }
 
 // DbType facilitates use of the database/sql API. Hnd is the exposed handle to
-// the database instance.
+// the database instance. This type is not safe for concurrent goroutine use,
+// although the Hnd field is.
 type DbType struct {
 	Hnd *sql.DB
 	tx  *sql.Tx
@@ -148,26 +149,32 @@ func (db *DbType) init() {
 	}
 }
 
+func setHandle(hnd *sql.DB, err error) (db *DbType) {
+	db = new(DbType)
+	db.Hnd = hnd
+	if err == nil && hnd == nil {
+		err = fmt.Errorf("database is closed")
+	}
+	db.err = err
+	db.init()
+	return db
+}
+
 // DbSetHandle initializes the dbmap instance with a database/sql handle that
 // is already open. This function can be used if the database needs to be
 // opened with special options. Only one of DbSetHandle, DbOpen and DbCreate
 // should be called to initialize the dbmap instance. Close() may be called to
 // close the specified handle after use.
 func DbSetHandle(hnd *sql.DB) (db *DbType) {
-	db = new(DbType)
-	db.Hnd = hnd
-	db.init()
-	return
+	return setHandle(hnd, nil)
 }
 
 // DbOpen opens a database with default options. Only one of DbSetHandle,
 // DbOpen and DbCreate should be called to initialize the dbmap instance. After
 // use, Close() should be called to free resources.
 func DbOpen(dbFileStr string) (db *DbType) {
-	db = new(DbType)
-	db.Hnd, db.err = sql.Open("sqlite3", dbFileStr)
-	db.init()
-	return
+	hnd, err := sql.Open("sqlite3", dbFileStr)
+	return setHandle(hnd, err)
 }
 
 // DbCreate creates a new database with default options or overwrites an
@@ -176,23 +183,22 @@ func DbOpen(dbFileStr string) (db *DbType) {
 // dbmap instance. After use, Close() should be called to free resources.
 func DbCreate(dbFileStr string) (db *DbType) {
 	var err error
-	db = new(DbType)
+	var hnd *sql.DB
 	dir := filepath.Dir(dbFileStr)
 	_, err = os.Stat(dir)
 	if err != nil {
-		db.err = os.MkdirAll(dir, 0755)
+		err = os.MkdirAll(dir, 0755)
 	}
-	if db.err == nil {
+	if err == nil {
 		_, err := os.Stat(dbFileStr)
 		if err == nil {
-			db.err = os.Remove(dbFileStr)
+			err = os.Remove(dbFileStr)
 		}
-		if db.err == nil {
-			db.Hnd, db.err = sql.Open("sqlite3", dbFileStr)
-			db.init()
+		if err == nil {
+			hnd, err = sql.Open("sqlite3", dbFileStr)
 		}
 	}
-	return
+	return setHandle(hnd, err)
 }
 
 // Close closes the dbmap instance.

@@ -3,3 +3,6 @@ data/*
 *sublime*
 cov
 coverage
+dbmap.go.0
+dbmap.go.1
+

@@ -410,6 +410,7 @@ func ExampleDbType_08() {
 	db.Insert([]gType{g})
 	report()
 	// Output:
+	// database is closed
 	// application error
 	// application error
 	// at least one field name expected in function Update
