@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"unsafe"
 )
 
@@ -76,11 +77,12 @@ type dscType struct {
 }
 
 // DbType facilitates use of the database/sql API. Hnd is the exposed handle to
-// the database instance. This type is not safe for concurrent goroutine use,
-// although the Hnd field is.
+// the database instance. Instances of this type are safe for concurrent
+// goroutine use.
 type DbType struct {
-	Hnd *sql.DB
-	tx  *sql.Tx
+	Hnd  *sql.DB
+	busy sync.Mutex
+	tx   *sql.Tx
 	// Cache for table descriptors
 	dscMap map[reflect.Type]dscType
 	// Cache for executable commands
@@ -90,34 +92,83 @@ type DbType struct {
 	tested  bool
 }
 
-// OK returns true if no processing errors have occurred.
-func (db *DbType) OK() bool {
+// Obtain clearance by means of a mutex to access and manipulate DbType
+// internals. This is called at the beginning of each exported method and a
+// balanced call to leave() is made when leaving the exported method. In order
+// to avoid recursive deadlocks, no calls to exported DbType methods are made
+// between enter() and leave(), even in deeper function calls.
+func (db *DbType) enter() {
+	db.busy.Lock()
+}
+
+func (db *DbType) leave() {
+	db.busy.Unlock()
+}
+
+func (db *DbType) lclOK() bool {
 	return db.err == nil
 }
 
+// OK returns true if no processing errors have occurred.
+func (db *DbType) OK() (ok bool) {
+	db.enter()
+	ok = db.err == nil
+	db.leave()
+	return ok
+}
+
 // Err returns true if a processing error has occurred.
-func (db *DbType) Err() bool {
-	return db.err != nil
+func (db *DbType) Err() (notOk bool) {
+	db.enter()
+	notOk = db.err != nil
+	db.leave()
+	return notOk
 }
 
 // ClearError unsets the current error value.
 func (db *DbType) ClearError() {
+	db.enter()
 	db.err = nil
+	db.leave()
 }
 
-// SetError sets an error to halt database calls. This may facilitate error
-// handling by application. A value of nil for err is ignored; use ClearError()
-// to unset the error condition. See also OK(), Err() and Error().
-func (db *DbType) SetError(err error) {
+func (db *DbType) lclSetError(err error) {
 	if db.err == nil && err != nil {
 		db.err = err
 		if !db.tested {
 			// Take the opportunity here to exercise some trivial code paths that cannot
 			// be tested externally
 			_ = prePad("")
+			_ = db.lclOK()
+			db.err = nil
+			db.transactEnd(false)
+			db.err = nil
+			db.transactBegin()
+			db.transactEnd(false)
+			db.err = nil
+			db.transactBegin()
+			_ = db.lclQuery("SELECT 1")
+			db.transactEnd(false)
+			db.err = err
 			_ = db.dscFromType(reflect.TypeOf(err), true)
 			db.tested = true
+			db.err = err
 		}
+	}
+}
+
+// SetError sets an error to halt database calls. This may facilitate error
+// handling by application. A value of nil for err is ignored; use ClearError()
+// to unset the error condition. See also OK(), Err() and Error().
+func (db *DbType) SetError(err error) {
+	db.enter()
+	db.lclSetError(err)
+	db.leave()
+}
+
+func (db *DbType) lclSetErrorf(fmtStr string, args ...interface{}) {
+	if db.err == nil {
+		db.err = fmt.Errorf(fmtStr, args...)
 	}
 }
 
@@ -127,14 +178,17 @@ func (db *DbType) SetError(err error) {
 // See the documentation for printing in the standard fmt package for details
 // about fmtStr and args.
 func (db *DbType) SetErrorf(fmtStr string, args ...interface{}) {
-	if db.err == nil {
-		db.err = fmt.Errorf(fmtStr, args...)
-	}
+	db.enter()
+	db.lclSetErrorf(fmtStr, args...)
+	db.leave()
 }
 
 // Error returns the internal Db error; this will be nil if no error has occurred.
-func (db *DbType) Error() error {
-	return db.err
+func (db *DbType) Error() (err error) {
+	db.enter()
+	err = db.err
+	db.leave()
+	return err
 }
 
 // String satisfies the fmt.Stringer interface and returns the library name
@@ -203,10 +257,12 @@ func DbCreate(dbFileStr string) (db *DbType) {
 
 // Close closes the dbmap instance.
 func (db *DbType) Close() {
+	db.enter()
 	if db.Hnd != nil {
 		db.Hnd.Close()
 		db.Hnd = nil
 	}
+	db.leave()
 }
 
 // Trace sets or unsets trace mode in which commands are printed to standard
@@ -214,15 +270,14 @@ func (db *DbType) Close() {
 // character flag indicating whether the command was cached (C), whether a
 // transaction is pending (T), and whether an error has occurred (E).
 func (db *DbType) Trace(on bool) {
-	// why? if db.err == nil {
+	db.enter()
 	db.trace = on
-	// }
+	db.leave()
 }
 
-// TransactBegin begins a new transaction. This function is typically not
-// needed by applications because transactions are managed by dbmap functions as
-// required.
-func (db *DbType) TransactBegin() {
+// transactBegin begins a new transaction. This function is not exported
+// because transactions are managed by dbmap functions as required.
+func (db *DbType) transactBegin() {
 	if db.err == nil {
 		if db.tx == nil {
 			db.tx, db.err = db.Hnd.Begin()
@@ -241,28 +296,8 @@ func (db *DbType) transactEnd(ok bool) {
 		db.tx = nil
 	} else {
 		if db.err == nil {
-			db.SetErrorf("no transaction to %s", strIf(ok, "commit", "rollback"))
+			db.lclSetErrorf("no transaction to %s", strIf(ok, "commit", "rollback"))
 		}
-	}
-	return
-}
-
-// TransactCommit commits the pending transaction. This function is typically
-// not needed by applications because transactions are managed by dbmap functions
-// as required.
-func (db *DbType) TransactCommit() {
-	if db.err == nil {
-		db.transactEnd(true)
-	}
-	return
-}
-
-// TransactRollback rolls back the pending transaction. This function is
-// typically not needed by applications because transactions are managed by dbmap
-// functions as required.
-func (db *DbType) TransactRollback() {
-	if db.err == nil {
-		db.transactEnd(false)
 	}
 	return
 }
@@ -291,36 +326,48 @@ func (db *DbType) report(cmdStr string, cached bool) {
 
 }
 
+func (db *DbType) lclExec(cmdStr string, prms ...interface{}) (res sql.Result) {
+	if db.err == nil {
+		stmt, cached := db.statement(cmdStr)
+		if db.err == nil {
+			if db.tx != nil {
+				stmt = db.tx.Stmt(stmt)
+			}
+			res, db.err = stmt.Exec(prms...)
+		}
+		db.report(cmdStr, cached)
+	}
+	return
+}
+
 // Exec compiles (if not already cached) and executes a statement that does not
 // return rows.
 func (db *DbType) Exec(cmdStr string, prms ...interface{}) (res sql.Result) {
-	if db.err != nil {
-		return
-	}
-	stmt, cached := db.statement(cmdStr)
+	db.enter()
+	res = db.lclExec(cmdStr, prms...)
+	db.leave()
+	return
+}
+
+func (db *DbType) lclQuery(cmdStr string, prms ...interface{}) (rows *sql.Rows) {
 	if db.err == nil {
-		if db.tx != nil {
-			stmt = db.tx.Stmt(stmt)
+		stmt, cached := db.statement(cmdStr)
+		if db.err == nil {
+			if db.tx != nil {
+				stmt = db.tx.Stmt(stmt)
+			}
+			rows, db.err = stmt.Query(prms...)
 		}
-		res, db.err = stmt.Exec(prms...)
+		db.report(cmdStr, cached)
 	}
-	db.report(cmdStr, cached)
 	return
 }
 
 // Query compiles (if not already cached) and executes a statement that return rows.
 func (db *DbType) Query(cmdStr string, prms ...interface{}) (rows *sql.Rows) {
-	if db.err != nil {
-		return
-	}
-	stmt, cached := db.statement(cmdStr)
-	if db.err == nil {
-		if db.tx != nil {
-			stmt = db.tx.Stmt(stmt)
-		}
-		rows, db.err = stmt.Query(prms...)
-	}
-	db.report(cmdStr, cached)
+	db.enter()
+	rows = db.lclQuery(cmdStr, prms...)
+	db.leave()
 	return
 }
 
@@ -420,7 +467,7 @@ func (db *DbType) dscFromType(recTp reflect.Type, primaryKeyRequired bool) (dsc 
 							strListAppend(&selList, "%s", sqlStr)
 							dsc.sel.sfList = append(dsc.sel.sfList, sf)
 						} else {
-							db.SetErrorf("database does not support fields of type %s", fldTp.String())
+							db.lclSetErrorf("database does not support fields of type %s", fldTp.String())
 						}
 					} else {
 						primaryStr = sf.Tag.Get("db_primary")
@@ -433,10 +480,10 @@ func (db *DbType) dscFromType(recTp reflect.Type, primaryKeyRequired bool) (dsc 
 									dsc.idSf = sf
 									dsc.idPresent = true
 								} else {
-									db.SetErrorf("expecting int64 for id, got %v", fldTp.Kind())
+									db.lclSetErrorf("expecting int64 for id, got %v", fldTp.Kind())
 								}
 							} else {
-								db.SetErrorf(`multiple occurrence of "db_primary" tag`)
+								db.lclSetErrorf(`multiple occurrence of "db_primary" tag`)
 							}
 						}
 					}
@@ -446,7 +493,7 @@ func (db *DbType) dscFromType(recTp reflect.Type, primaryKeyRequired bool) (dsc 
 							if len(dsc.tblStr) == 0 {
 								dsc.tblStr = tblStr
 							} else {
-								db.SetErrorf(`multiple occurrence of "db_table" tag`)
+								db.lclSetErrorf(`multiple occurrence of "db_table" tag`)
 							}
 						}
 					}
@@ -454,9 +501,9 @@ func (db *DbType) dscFromType(recTp reflect.Type, primaryKeyRequired bool) (dsc 
 			}
 			if db.err == nil {
 				if len(dsc.insert.sfList) == 0 {
-					db.SetErrorf(`no structure fields have "db" tag`)
+					db.lclSetErrorf(`no structure fields have "db" tag`)
 				} else if len(dsc.tblStr) == 0 {
-					db.SetErrorf(`missing "db_table" tag`)
+					db.lclSetErrorf(`missing "db_table" tag`)
 				} else {
 					dsc.insert.qmStr = strings.Join(qmList, ", ")
 					dsc.insert.nameStr = strings.Join(dsc.insert.nameList, ", ")
@@ -468,10 +515,10 @@ func (db *DbType) dscFromType(recTp reflect.Type, primaryKeyRequired bool) (dsc 
 			}
 		}
 		if primaryKeyRequired && !dsc.idPresent {
-			db.SetErrorf(`primary key is required but is not present in structure`)
+			db.lclSetErrorf(`primary key is required but is not present in structure`)
 		}
 	} else {
-		db.SetErrorf(`specified address must be of structure with ` +
+		db.lclSetErrorf(`specified address must be of structure with ` +
 			`one or more fields that have a "db" tag`)
 	}
 	return
@@ -485,7 +532,7 @@ func (db *DbType) dscFromPtr(recPtr interface{}, primaryKeyRequired bool) (dsc d
 	if kd == reflect.Ptr {
 		return db.dscFromType(ptrVl.Elem().Type(), primaryKeyRequired)
 	}
-	db.SetErrorf("expecting record pointer, got %v", kd)
+	db.lclSetErrorf("expecting record pointer, got %v", kd)
 	return
 }
 
@@ -498,47 +545,48 @@ func strListAppend(listPtr *[]string, fmtStr string, args ...interface{}) {
 // specified record. The table and indexes are overwritten if they already
 // exist.
 func (db *DbType) TableCreate(recPtr interface{}) {
-	if db.err != nil {
-		return
-	}
-	// DROP TABLE IF EXISTS foo
-	// DROP INDEX IF EXISTS fooID;
-	// DROP INDEX IF EXISTS fooDate;
-	// CREATE TABLE foo (num int32, name string)
-	// CREATE INDEX fooID ON foo (rowid);
-	// CREATE INDEX fooDate ON foo (Date);
-	var dsc dscType
-	// fmt.Printf("Trace 1 %v\n", db.trace)
-	dsc = db.dscFromPtr(recPtr, false)
+	db.enter()
 	if db.err == nil {
-		// fmt.Printf("Trace 2 %v\n", db.trace)
-		// Consider supporting flag that controls how existing table is handled
-		// (function fail or table overwritten)
-		// db.TransactBegin()
+		// DROP TABLE IF EXISTS foo
+		// DROP INDEX IF EXISTS fooID;
+		// DROP INDEX IF EXISTS fooDate;
+		// CREATE TABLE foo (num int32, name string)
+		// CREATE INDEX fooID ON foo (rowid);
+		// CREATE INDEX fooDate ON foo (Date);
+		var dsc dscType
+		// fmt.Printf("Trace 1 %v\n", db.trace)
+		dsc = db.dscFromPtr(recPtr, false)
 		if db.err == nil {
-			// fmt.Printf("Trace 3 %v\n", db.trace)
-			cmd := fmt.Sprintf("DROP TABLE IF EXISTS %s;", dsc.tblStr)
-			_ = db.Exec(cmd)
-			// fmt.Printf("Trace 4 %v\n", db.trace)
-			for _, idx := range dsc.create.idxList {
-				cmd = fmt.Sprintf("DROP INDEX IF EXISTS %s%s;", dsc.tblStr, idx.nameStr)
-				_ = db.Exec(cmd)
-			}
+			// fmt.Printf("Trace 2 %v\n", db.trace)
+			// Consider supporting flag that controls how existing table is handled
+			// (function fail or table overwritten)
+			// db.transactBegin()
 			if db.err == nil {
-				cmd = fmt.Sprintf("CREATE TABLE %s (%s);", dsc.tblStr, dsc.create.nameTypeStr)
-				// fmt.Printf("dbmap [%s]\n", cmd)
-				_ = db.Exec(cmd)
+				// fmt.Printf("Trace 3 %v\n", db.trace)
+				cmd := fmt.Sprintf("DROP TABLE IF EXISTS %s;", dsc.tblStr)
+				_ = db.lclExec(cmd)
+				// fmt.Printf("Trace 4 %v\n", db.trace)
 				for _, idx := range dsc.create.idxList {
-					cmd = fmt.Sprintf("CREATE INDEX %s%s ON %s (%s);",
-						dsc.tblStr, idx.nameStr, dsc.tblStr, idx.fldStr)
-					// fmt.Printf("dbmap [%s]\n", cmd)
-					_ = db.Exec(cmd)
+					cmd = fmt.Sprintf("DROP INDEX IF EXISTS %s%s;", dsc.tblStr, idx.nameStr)
+					_ = db.lclExec(cmd)
 				}
-				// fmt.Printf("%s\n", strIf(db.OK(), "OK", "Not OK"))
+				if db.err == nil {
+					cmd = fmt.Sprintf("CREATE TABLE %s (%s);", dsc.tblStr, dsc.create.nameTypeStr)
+					// fmt.Printf("dbmap [%s]\n", cmd)
+					_ = db.lclExec(cmd)
+					for _, idx := range dsc.create.idxList {
+						cmd = fmt.Sprintf("CREATE INDEX %s%s ON %s (%s);",
+							dsc.tblStr, idx.nameStr, dsc.tblStr, idx.fldStr)
+						// fmt.Printf("dbmap [%s]\n", cmd)
+						_ = db.lclExec(cmd)
+					}
+					// fmt.Printf("%s\n", strIf(db.lclOK(), "OK", "Not OK"))
+				}
 			}
+			// db.transactEnd(db.err == nil)
 		}
-		// db.transactEnd(db.err == nil)
 	}
+	db.leave()
 	return
 }
 
@@ -551,45 +599,46 @@ func (db *DbType) TableCreate(recPtr interface{}) {
 // first string is "*", all fields are updated. Unmatched field names result in
 // an error.
 func (db *DbType) Update(recPtr interface{}, fldNames ...string) {
-	if db.err != nil {
-		return
-	}
-	// UPDATE foo SET name = ?, num = ? WHERE rowid = ?;
-	if len(fldNames) > 0 {
-		var dsc dscType
-		dsc = db.dscFromPtr(recPtr, true)
-		if db.err == nil {
-			recVl := reflect.ValueOf(recPtr).Elem()
-			addr := recVl.UnsafeAddr()
-			var args []interface{}
-			var eqList []string
-			var sf reflect.StructField
-			if fldNames[0] == "*" {
-				fldNames = dsc.insert.nameList
-			}
-			pos := 0
-			for _, nm := range fldNames {
-				// fmt.Printf("sf.Name [%s], %v\n", sf.Name, fldMap[sf.Name])
-				pos++
-				sf = dsc.nameMap[nm]
-				strListAppend(&eqList, "%s = ?", nm)
-				args = append(args, reflect.Indirect(
-					reflect.NewAt(sf.Type, unsafe.Pointer(addr+sf.Offset))).Interface())
-			}
-			args = append(args, reflect.Indirect(
-				reflect.NewAt(dsc.idSf.Type, unsafe.Pointer(addr+dsc.idSf.Offset))).Interface())
-			db.TransactBegin()
+	db.enter()
+	if db.err == nil {
+		// UPDATE foo SET name = ?, num = ? WHERE rowid = ?;
+		if len(fldNames) > 0 {
+			var dsc dscType
+			dsc = db.dscFromPtr(recPtr, true)
 			if db.err == nil {
-				cmd := fmt.Sprintf("UPDATE %s SET %s WHERE rowid = ?;", dsc.tblStr,
-					strings.Join(eqList, ", "))
-				// fmt.Println(cmd)
-				_ = db.Exec(cmd, args...)
+				recVl := reflect.ValueOf(recPtr).Elem()
+				addr := recVl.UnsafeAddr()
+				var args []interface{}
+				var eqList []string
+				var sf reflect.StructField
+				if fldNames[0] == "*" {
+					fldNames = dsc.insert.nameList
+				}
+				pos := 0
+				for _, nm := range fldNames {
+					// fmt.Printf("sf.Name [%s], %v\n", sf.Name, fldMap[sf.Name])
+					pos++
+					sf = dsc.nameMap[nm]
+					strListAppend(&eqList, "%s = ?", nm)
+					args = append(args, reflect.Indirect(
+						reflect.NewAt(sf.Type, unsafe.Pointer(addr+sf.Offset))).Interface())
+				}
+				args = append(args, reflect.Indirect(
+					reflect.NewAt(dsc.idSf.Type, unsafe.Pointer(addr+dsc.idSf.Offset))).Interface())
+				db.transactBegin()
+				if db.err == nil {
+					cmd := fmt.Sprintf("UPDATE %s SET %s WHERE rowid = ?;", dsc.tblStr,
+						strings.Join(eqList, ", "))
+					// fmt.Println(cmd)
+					_ = db.lclExec(cmd, args...)
+				}
+				db.transactEnd(db.err == nil)
 			}
-			db.transactEnd(db.err == nil)
+		} else {
+			db.lclSetErrorf("at least one field name expected in function Update")
 		}
-	} else {
-		db.SetErrorf("at least one field name expected in function Update")
 	}
+	db.leave()
 	return
 }
 
@@ -597,39 +646,41 @@ func (db *DbType) Update(recPtr interface{}, fldNames ...string) {
 // clause and its arguments. For example, if tailStr is empty, all records from
 // the table will be deleted.
 func (db *DbType) Delete(recPtr interface{}, tailStr string, prms ...interface{}) {
-	if db.err != nil {
-		return
-	}
-	// DELETE FROM foo WHERE a > ? AND b < ?
-	var dsc dscType
-	dsc = db.dscFromPtr(recPtr, false)
+	db.enter()
 	if db.err == nil {
-		db.TransactBegin()
+		// DELETE FROM foo WHERE a > ? AND b < ?
+		var dsc dscType
+		dsc = db.dscFromPtr(recPtr, false)
 		if db.err == nil {
-			cmd := fmt.Sprintf("DELETE FROM %s%s;", dsc.tblStr, prePad(tailStr))
-			_ = db.Exec(cmd, prms...)
+			db.transactBegin()
+			if db.err == nil {
+				cmd := fmt.Sprintf("DELETE FROM %s%s;", dsc.tblStr, prePad(tailStr))
+				_ = db.lclExec(cmd, prms...)
+			}
+			db.transactEnd(db.err == nil)
 		}
-		db.transactEnd(db.err == nil)
 	}
+	db.leave()
 }
 
 // Truncate removes all records from the table in the database associated with
 // the specified record pointer.
 func (db *DbType) Truncate(recPtr interface{}) {
-	if db.err != nil {
-		return
-	}
-	// DELETE FROM foo;
-	var dsc dscType
-	dsc = db.dscFromPtr(recPtr, false)
+	db.enter()
 	if db.err == nil {
-		db.TransactBegin()
+		// DELETE FROM foo;
+		var dsc dscType
+		dsc = db.dscFromPtr(recPtr, false)
 		if db.err == nil {
-			cmd := fmt.Sprintf("DELETE FROM %s;", dsc.tblStr)
-			_ = db.Exec(cmd)
+			db.transactBegin()
+			if db.err == nil {
+				cmd := fmt.Sprintf("DELETE FROM %s;", dsc.tblStr)
+				_ = db.lclExec(cmd)
+			}
+			db.transactEnd(db.err == nil)
 		}
-		db.transactEnd(db.err == nil)
 	}
+	db.leave()
 }
 
 // Insert stores in the database the records included in the specified slice.
@@ -637,41 +688,42 @@ func (db *DbType) Truncate(recPtr interface{}) {
 // this function returns, the ID field of each inserted record will contain the
 // indentifier assigned by the database.
 func (db *DbType) Insert(slice interface{}) {
-	if db.err != nil {
-		return
-	}
-	var dsc dscType
-	var id int64
-	var res sql.Result
-	var vList []interface{}
-	sliceVl := reflect.ValueOf(slice)
-	sliceTp := sliceVl.Type()
-	if sliceTp.Kind() == reflect.Slice {
-		count := sliceVl.Len()
-		recTp := sliceTp.Elem()
-		dsc = db.dscFromType(recTp, true)
-		if db.err == nil {
-			cmdStr := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s);",
-				dsc.tblStr, dsc.insert.nameStr, dsc.insert.qmStr)
-			// fmt.Printf("dbmap [%s]\n", cmdStr)
-			var idVal, recVl reflect.Value
-			db.TransactBegin()
-			for recJ := 0; recJ < count && db.err == nil; recJ++ { // Record loop
-				recVl = sliceVl.Index(recJ)
-				vList = valueInterfaceList(recVl, dsc.insert.sfList)
-				res = db.Exec(cmdStr, vList...)
-				if db.err == nil {
-					id, _ = res.LastInsertId()
-					idVal = reflect.Indirect(reflect.NewAt(dsc.idSf.Type,
-						unsafe.Pointer(recVl.UnsafeAddr()+dsc.idSf.Offset)))
-					idVal.SetInt(id)
+	db.enter()
+	if db.err == nil {
+		var dsc dscType
+		var id int64
+		var res sql.Result
+		var vList []interface{}
+		sliceVl := reflect.ValueOf(slice)
+		sliceTp := sliceVl.Type()
+		if sliceTp.Kind() == reflect.Slice {
+			count := sliceVl.Len()
+			recTp := sliceTp.Elem()
+			dsc = db.dscFromType(recTp, true)
+			if db.err == nil {
+				cmdStr := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s);",
+					dsc.tblStr, dsc.insert.nameStr, dsc.insert.qmStr)
+				// fmt.Printf("dbmap [%s]\n", cmdStr)
+				var idVal, recVl reflect.Value
+				db.transactBegin()
+				for recJ := 0; recJ < count && db.err == nil; recJ++ { // Record loop
+					recVl = sliceVl.Index(recJ)
+					vList = valueInterfaceList(recVl, dsc.insert.sfList)
+					res = db.lclExec(cmdStr, vList...)
+					if db.err == nil {
+						id, _ = res.LastInsertId()
+						idVal = reflect.Indirect(reflect.NewAt(dsc.idSf.Type,
+							unsafe.Pointer(recVl.UnsafeAddr()+dsc.idSf.Offset)))
+						idVal.SetInt(id)
+					}
 				}
+				db.transactEnd(db.err == nil)
 			}
-			db.transactEnd(db.err == nil)
+		} else {
+			db.lclSetErrorf("function Insert requires slice as first argument")
 		}
-	} else {
-		db.SetErrorf("function Insert requires slice as first argument")
 	}
+	db.leave()
 }
 
 // Retrieve selects zero or more records of the type pointed to by slicePtr
@@ -681,49 +733,50 @@ func (db *DbType) Insert(slice interface{}) {
 // clause. For every parameter token ("?", "?", etc) in the string, a
 // suitable expression list (one-based) after the tail string should be passed.
 func (db *DbType) Retrieve(slicePtr interface{}, tailStr string, prms ...interface{}) {
-	if db.err != nil {
-		return
-	}
-	var dsc dscType
-	slicePtrVl := reflect.ValueOf(slicePtr)
-	kd := slicePtrVl.Kind()
-	if kd == reflect.Ptr {
-		sliceVl := reflect.Indirect(slicePtrVl)
-		kd = sliceVl.Kind()
-		if kd == reflect.Slice {
-			sliceTp := sliceVl.Type()
-			recTp := sliceTp.Elem()
-			dsc = db.dscFromType(recTp, false)
-			if db.err == nil {
-				cmdStr := fmt.Sprintf("SELECT %s FROM %s%s;",
-					dsc.sel.nameStr, dsc.tblStr, prePad(tailStr))
-				var rows *sql.Rows
-				rows = db.Query(cmdStr, prms...)
+	db.enter()
+	if db.err == nil {
+		var dsc dscType
+		slicePtrVl := reflect.ValueOf(slicePtr)
+		kd := slicePtrVl.Kind()
+		if kd == reflect.Ptr {
+			sliceVl := reflect.Indirect(slicePtrVl)
+			kd = sliceVl.Kind()
+			if kd == reflect.Slice {
+				sliceTp := sliceVl.Type()
+				recTp := sliceTp.Elem()
+				dsc = db.dscFromType(recTp, false)
 				if db.err == nil {
-					recVl := reflect.Indirect(reflect.New(recTp)) // Buffer
-					vList := valueInterfaceAddrList(recVl, dsc.sel.sfList)
-					for rows.Next() {
-						// fmt.Printf("Next %s\n", strIf(db.OK(), "OK", "Not OK"))
-						if db.err == nil {
-							db.err = rows.Scan(vList...)
-							// fmt.Printf("Scan %s\n", strIf(db.OK(), "OK", "Not OK"))
+					cmdStr := fmt.Sprintf("SELECT %s FROM %s%s;",
+						dsc.sel.nameStr, dsc.tblStr, prePad(tailStr))
+					var rows *sql.Rows
+					rows = db.lclQuery(cmdStr, prms...)
+					if db.err == nil {
+						recVl := reflect.Indirect(reflect.New(recTp)) // Buffer
+						vList := valueInterfaceAddrList(recVl, dsc.sel.sfList)
+						for rows.Next() {
+							// fmt.Printf("Next %s\n", strIf(db.lclOK(), "OK", "Not OK"))
 							if db.err == nil {
-								sliceVl = reflect.Append(sliceVl, recVl)
+								db.err = rows.Scan(vList...)
+								// fmt.Printf("Scan %s\n", strIf(db.lclOK(), "OK", "Not OK"))
+								if db.err == nil {
+									sliceVl = reflect.Append(sliceVl, recVl)
+								}
 							}
 						}
-					}
-					if db.err == nil {
-						// Assign sliceVl back to *slicePtr
-						reflect.Indirect(slicePtrVl).Set(sliceVl)
+						if db.err == nil {
+							// Assign sliceVl back to *slicePtr
+							reflect.Indirect(slicePtrVl).Set(sliceVl)
+						}
 					}
 				}
+			} else {
+				db.lclSetErrorf("function Retrieve expecting pointer to slice, got pointer to %v", kd)
+
 			}
 		} else {
-			db.SetErrorf("function Retrieve expecting pointer to slice, got pointer to %v", kd)
-
+			db.lclSetErrorf("function Retrieve expecting pointer to slice, got %v", kd)
 		}
-	} else {
-		db.SetErrorf("function Retrieve expecting pointer to slice, got %v", kd)
 	}
+	db.leave()
 	return
 }

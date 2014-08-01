@@ -326,9 +326,9 @@ func ExampleDbType_08() {
 	os.RemoveAll("data/foo")
 	db = dbmap.DbCreate("data/example.db")
 	db.TableCreate(&rec)
-	db.TransactBegin()
+	// db.TransactBegin()
 	db.Retrieve(&rl, "")
-	db.TransactRollback()
+	// db.TransactRollback()
 	db.SetErrorf("application %s", "error")
 	err := db.Error()
 	// The following several calls exercise the quick return on existing error
@@ -352,9 +352,9 @@ func ExampleDbType_08() {
 	report()
 	db.Retrieve(rec, "")
 	report()
-	db.TransactCommit()
+	// db.TransactCommit()
 	report()
-	db.TransactRollback()
+	// db.TransactRollback()
 	report()
 	db.Trace(true)
 	db.Exec("foo")
@@ -417,8 +417,6 @@ func ExampleDbType_08() {
 	// function Insert requires slice as first argument
 	// function Retrieve expecting pointer to slice, got pointer to struct
 	// function Retrieve expecting pointer to slice, got struct
-	// no transaction to commit
-	// no transaction to rollback
 	// dbmap [--E] foo
 	// near "foo": syntax error
 	// expecting int64 for id, got bool

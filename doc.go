@@ -19,7 +19,8 @@ Package dbmap implements a simple, high-level wrapper for the database/sql
 package. Currently, only sqlite3 (using github.com/mattn/go-sqlite3) has been
 tested. Each table in the database is associated with an application-defined
 structure in Go. These structures contain special tags that allow dbmap to
-automatically manage basic database operations.
+automatically manage basic database operations. Instances of DbType are safe
+for use by multiple goroutines.
 
 License
 
