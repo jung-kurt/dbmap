@@ -66,8 +66,8 @@ This package exposes two method receiver types, DscType and WrapType. Of the
 two, DscType performs lower level functions and its methods return errors
 directly. Instances of this type are safe for use by multiple goroutines.
 
-The methods of WrapType hide the details of using DscType and facilitates error
-management. Instances of this type are not safe for shared use. If an error
+The methods of WrapType hide the details of using DscType and facilitate error
+management. Instances of this type are not safe for concurrent use. If an error
 occurs in a WrapType method, an internal error field is set. After this
 happens, WrapType method calls typically return without performing any
 operations and the error state is retained. This error management scheme
