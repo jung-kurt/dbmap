@@ -255,8 +255,13 @@ func (dsc DscType) SelectArg(recPtr interface{}) (argList []interface{}, err err
 
 // CreateStr returns a command string suitable for creating the database table
 // that is associated with the receiver.
-func (dsc DscType) CreateStr() string {
-	return fmt.Sprintf("CREATE TABLE %s (%s);", dsc.tblStr, dsc.create.nameTypeStr)
+func (dsc DscType) CreateStr() (createStr string, idxStrList []string) {
+	createStr = fmt.Sprintf("CREATE TABLE %s (%s);", dsc.tblStr, dsc.create.nameTypeStr)
+	for j, idx := range dsc.create.idxList {
+		idxStrList = append(idxStrList, fmt.Sprintf("CREATE INDEX %s_idx_%d ON %s (%s)",
+			dsc.tblStr, j+1, dsc.tblStr, idx.fldStr))
+	}
+	return
 }
 
 func (dsc DscType) updateNames(fldNames ...string) []string {

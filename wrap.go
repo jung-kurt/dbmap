@@ -213,14 +213,24 @@ func (w *WrapType) Update(rec interface{}, fldNames ...string) {
 	}
 }
 
-// Create adds a new table of the type associated with the receiver.
+// Create adds a new table and indexes of the type associated with the receiver.
 func (w *WrapType) Create() {
 	if w.sharePtr.errVal == nil {
-		cmdStr := w.dsc.CreateStr()
+		cmdStr, idxList := w.dsc.CreateStr()
 		if w.sharePtr.tx == nil {
-			w.res, w.sharePtr.errVal = w.sharePtr.hnd.Exec(cmdStr)
+			_, w.sharePtr.errVal = w.sharePtr.hnd.Exec(cmdStr)
+			for _, cmdStr = range idxList {
+				if w.sharePtr.errVal == nil {
+					_, w.sharePtr.errVal = w.sharePtr.hnd.Exec(cmdStr)
+				}
+			}
 		} else {
-			w.res, w.sharePtr.errVal = w.sharePtr.tx.Exec(cmdStr)
+			_, w.sharePtr.errVal = w.sharePtr.tx.Exec(cmdStr)
+			for _, cmdStr = range idxList {
+				if w.sharePtr.errVal == nil {
+					_, w.sharePtr.errVal = w.sharePtr.tx.Exec(cmdStr)
+				}
+			}
 		}
 	}
 }

@@ -206,7 +206,8 @@ func ExampleDscType_04() {
 			var tx *sql.Tx
 			tx, err = hnd.Begin()
 			if err == nil {
-				_, err = tx.Exec(dsc.CreateStr())
+				cmdStr, _ := dsc.CreateStr()
+				_, err = tx.Exec(cmdStr)
 			}
 			if err == nil {
 				var rec recType
