@@ -1,33 +1,20 @@
-/*
- * Copyright (c) 2014 Kurt Jung (Gmail: kurt.w.jung)
- *
- * Permission to use, copy, modify, and distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
- * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
- * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
- * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
- */
-
 package dbmap
 
 import (
-	"database/sql"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	// "os"
 	"reflect"
 	"strings"
-	"sync"
-	"unsafe"
 )
 
-var typeMap = map[string]string{
+// func outf(fmtStr string, args ...interface{}) {
+// 	fmt.Fprintf(os.Stderr, fmtStr, args...)
+// }
+
+type tmType map[string]string
+
+var typeMap = tmType{
 	"[]uint8": "blob",
 	"bool":    "integer",
 	"byte":    "integer",
@@ -53,331 +40,30 @@ type idxType struct {
 	fldStr  string
 }
 
-type dscType struct {
-	tblStr    string                         // Name of database table
-	idPresent bool                           // Primary key is present in table
-	idSf      reflect.StructField            // Descriptor for primary key
-	recTp     reflect.Type                   // Record interface
-	nameMap   map[string]reflect.StructField // {"num":@, "name":@, ...}
-	create    struct {
-		nameTypeStr string    // "num int32, name string, ..."
-		idxList     []idxType // {{"fooID", "rowid"}, {"fooName", "Name"}, {"fooNum", "Num"}, ...}
-	}
-	insert struct {
-		nameStr  string   // "num, name, ..."
-		nameList []string // {"num", "name", ...}
-		qmStr    string   // "?, ?, ..."
-		sfList   []reflect.StructField
-	}
-	sel struct {
-		nameStr     string                // "rowid, num, name, ..."
-		sfList      []reflect.StructField // Includes ID
-		typeStrList []string              // {"int64", "bigint", "string", ...}
-	}
+type idxListType []idxType
+
+func (list *idxListType) append(nameStr, fldStr string) {
+	*list = append(*list, idxType{nameStr, fldStr})
 }
 
-// DbType facilitates use of the database/sql API. Hnd is the exposed handle to
-// the database instance. Instances of this type are safe for concurrent
-// goroutine use.
-type DbType struct {
-	Hnd  *sql.DB
-	busy sync.Mutex
-	tx   *sql.Tx
-	// Cache for table descriptors
-	dscMap map[reflect.Type]dscType
-	// Cache for executable commands
-	stmtMap map[string]*sql.Stmt
-	trace   bool
-	err     error
-	tested  bool
+type strListType []string
+
+func (list *strListType) append(str string) {
+	*list = append(*list, str)
 }
 
-// Obtain clearance by means of a mutex to access and manipulate DbType
-// internals. This is called at the beginning of each exported method and a
-// balanced call to leave() is made when leaving the exported method. In order
-// to avoid recursive deadlocks, no calls to exported DbType methods are made
-// between enter() and leave(), even in deeper function calls.
-func (db *DbType) enter() {
-	db.busy.Lock()
+func (list *strListType) appendf(fmtStr string, args ...interface{}) {
+	list.append(fmt.Sprintf(fmtStr, args...))
 }
 
-func (db *DbType) leave() {
-	db.busy.Unlock()
+func (list *strListType) join() string {
+	return strings.Join(*list, ", ")
 }
 
-func (db *DbType) lclOK() bool {
-	return db.err == nil
-}
+type sfListType []reflect.StructField
 
-// OK returns true if no processing errors have occurred.
-func (db *DbType) OK() (ok bool) {
-	db.enter()
-	ok = db.err == nil
-	db.leave()
-	return ok
-}
-
-// Err returns true if a processing error has occurred.
-func (db *DbType) Err() (notOk bool) {
-	db.enter()
-	notOk = db.err != nil
-	db.leave()
-	return notOk
-}
-
-// ClearError unsets the current error value.
-func (db *DbType) ClearError() {
-	db.enter()
-	db.err = nil
-	db.leave()
-}
-
-func (db *DbType) lclSetError(err error) {
-	if db.err == nil && err != nil {
-		db.err = err
-		if !db.tested {
-			// Take the opportunity here to exercise some trivial code paths that cannot
-			// be tested externally
-			_ = prePad("")
-			_ = db.lclOK()
-			db.err = nil
-			db.transactEnd(false)
-			db.err = nil
-			db.transactBegin()
-			db.transactEnd(false)
-			db.err = nil
-			db.transactBegin()
-			_ = db.lclQuery("SELECT 1")
-			db.transactEnd(false)
-			db.err = err
-			_ = db.dscFromType(reflect.TypeOf(err), true)
-			db.tested = true
-			db.err = err
-		}
-	}
-}
-
-// SetError sets an error to halt database calls. This may facilitate error
-// handling by application. A value of nil for err is ignored; use ClearError()
-// to unset the error condition. See also OK(), Err() and Error().
-func (db *DbType) SetError(err error) {
-	db.enter()
-	db.lclSetError(err)
-	db.leave()
-}
-
-func (db *DbType) lclSetErrorf(fmtStr string, args ...interface{}) {
-	if db.err == nil {
-		db.err = fmt.Errorf(fmtStr, args...)
-	}
-}
-
-// SetErrorf sets the internal Db error with formatted text to halt database
-// calls. This may facilitate error handling by application.
-//
-// See the documentation for printing in the standard fmt package for details
-// about fmtStr and args.
-func (db *DbType) SetErrorf(fmtStr string, args ...interface{}) {
-	db.enter()
-	db.lclSetErrorf(fmtStr, args...)
-	db.leave()
-}
-
-// Error returns the internal Db error; this will be nil if no error has occurred.
-func (db *DbType) Error() (err error) {
-	db.enter()
-	err = db.err
-	db.leave()
-	return err
-}
-
-// String satisfies the fmt.Stringer interface and returns the library name
-func (db *DbType) String() string {
-	return "dbmap"
-}
-
-func (db *DbType) init() {
-	if db.err == nil {
-		db.dscMap = make(map[reflect.Type]dscType)
-		db.stmtMap = make(map[string]*sql.Stmt)
-	}
-}
-
-func setHandle(hnd *sql.DB, err error) (db *DbType) {
-	db = new(DbType)
-	db.Hnd = hnd
-	if err == nil && hnd == nil {
-		err = fmt.Errorf("database is closed")
-	}
-	db.err = err
-	db.init()
-	return db
-}
-
-// DbSetHandle initializes the dbmap instance with a database/sql handle that
-// is already open. This function can be used if the database needs to be
-// opened with special options. Only one of DbSetHandle, DbOpen and DbCreate
-// should be called to initialize the dbmap instance. Close() may be called to
-// close the specified handle after use.
-func DbSetHandle(hnd *sql.DB) (db *DbType) {
-	return setHandle(hnd, nil)
-}
-
-// DbOpen opens a database with default options. Only one of DbSetHandle,
-// DbOpen and DbCreate should be called to initialize the dbmap instance. After
-// use, Close() should be called to free resources.
-func DbOpen(dbFileStr string) (db *DbType) {
-	hnd, err := sql.Open("sqlite3", dbFileStr)
-	return setHandle(hnd, err)
-}
-
-// DbCreate creates a new database with default options or overwrites an
-// existing one. The directory path to the file will be created if needed. Only
-// one of DbSetHandle, DbOpen and DbCreate should be called to initialize the
-// dbmap instance. After use, Close() should be called to free resources.
-func DbCreate(dbFileStr string) (db *DbType) {
-	var err error
-	var hnd *sql.DB
-	dir := filepath.Dir(dbFileStr)
-	_, err = os.Stat(dir)
-	if err != nil {
-		err = os.MkdirAll(dir, 0755)
-	}
-	if err == nil {
-		_, err := os.Stat(dbFileStr)
-		if err == nil {
-			err = os.Remove(dbFileStr)
-		}
-		if err == nil {
-			hnd, err = sql.Open("sqlite3", dbFileStr)
-		}
-	}
-	return setHandle(hnd, err)
-}
-
-// Close closes the dbmap instance.
-func (db *DbType) Close() {
-	db.enter()
-	if db.Hnd != nil {
-		db.Hnd.Close()
-		db.Hnd = nil
-	}
-	db.leave()
-}
-
-// Trace sets or unsets trace mode in which commands are printed to standard
-// out. Statements that are submitted for execution are printed with a three
-// character flag indicating whether the command was cached (C), whether a
-// transaction is pending (T), and whether an error has occurred (E).
-func (db *DbType) Trace(on bool) {
-	db.enter()
-	db.trace = on
-	db.leave()
-}
-
-// transactBegin begins a new transaction. This function is not exported
-// because transactions are managed by dbmap functions as required.
-func (db *DbType) transactBegin() {
-	if db.err == nil {
-		if db.tx == nil {
-			db.tx, db.err = db.Hnd.Begin()
-		}
-	}
-	return
-}
-
-func (db *DbType) transactEnd(ok bool) {
-	if db.tx != nil {
-		if ok {
-			db.err = db.tx.Commit()
-		} else {
-			db.err = db.tx.Rollback()
-		}
-		db.tx = nil
-	} else {
-		if db.err == nil {
-			db.lclSetErrorf("no transaction to %s", strIf(ok, "commit", "rollback"))
-		}
-	}
-	return
-}
-
-func (db *DbType) statement(cmdStr string) (stmt *sql.Stmt, cached bool) {
-	stmt, cached = db.stmtMap[cmdStr]
-	if !cached {
-		// Caveat: cached commands may become obsolete as different execution paths
-		// result from changing database.
-		stmt, db.err = db.Hnd.Prepare(cmdStr)
-		if db.err == nil {
-			db.stmtMap[cmdStr] = stmt
-		}
-	}
-	return
-}
-
-func (db *DbType) report(cmdStr string, cached bool) {
-	if db.trace {
-		fmt.Printf("dbmap [%s%s%s] %s\n",
-			strIf(cached, "C", "-"),
-			strIf(db.tx != nil, "T", "-"),
-			strIf(db.err != nil, "E", "-"),
-			cmdStr)
-	}
-
-}
-
-func (db *DbType) lclExec(cmdStr string, prms ...interface{}) (res sql.Result) {
-	if db.err == nil {
-		stmt, cached := db.statement(cmdStr)
-		if db.err == nil {
-			if db.tx != nil {
-				stmt = db.tx.Stmt(stmt)
-			}
-			res, db.err = stmt.Exec(prms...)
-		}
-		db.report(cmdStr, cached)
-	}
-	return
-}
-
-// Exec compiles (if not already cached) and executes a statement that does not
-// return rows.
-func (db *DbType) Exec(cmdStr string, prms ...interface{}) (res sql.Result) {
-	db.enter()
-	res = db.lclExec(cmdStr, prms...)
-	db.leave()
-	return
-}
-
-func (db *DbType) lclQuery(cmdStr string, prms ...interface{}) (rows *sql.Rows) {
-	if db.err == nil {
-		stmt, cached := db.statement(cmdStr)
-		if db.err == nil {
-			if db.tx != nil {
-				stmt = db.tx.Stmt(stmt)
-			}
-			rows, db.err = stmt.Query(prms...)
-		}
-		db.report(cmdStr, cached)
-	}
-	return
-}
-
-// Query compiles (if not already cached) and executes a statement that return rows.
-func (db *DbType) Query(cmdStr string, prms ...interface{}) (rows *sql.Rows) {
-	db.enter()
-	rows = db.lclQuery(cmdStr, prms...)
-	db.leave()
-	return
-}
-
-func strIf(cond bool, aStr string, bStr string) (res string) {
-	if cond {
-		res = aStr
-	} else {
-		res = bStr
-	}
-	return
+func (list *sfListType) append(sf reflect.StructField) {
+	*list = append(*list, sf)
 }
 
 func prePad(str string) string {
@@ -387,396 +73,328 @@ func prePad(str string) string {
 	return str
 }
 
-func valueList(recVl reflect.Value, sfList []reflect.StructField) (list []reflect.Value) {
-	addr := recVl.UnsafeAddr()
-	var fldVl reflect.Value
-	for _, sf := range sfList {
-		fldVl = reflect.Indirect(reflect.NewAt(sf.Type, unsafe.Pointer(addr+sf.Offset)))
-		list = append(list, fldVl)
+// DscType contains meta information of a particular record structure. It
+// facilitates the construction and organization of SQL calls. It is lock-free
+// and is safe for concurrent use by goroutines. It is generally instantiated
+// once (with a call to Describe() or MustDescribe()) and used for the duration
+// of the program.
+type DscType struct {
+	// Name of database table
+	tblStr string
+	// Primary key is present in table
+	idPresent bool
+	// Descriptor for primary key if present
+	idSf reflect.StructField
+	// Record interface
+	recTp reflect.Type
+	// {"num":sfNum, "name":sfName, ...}
+	nameMap map[string]reflect.StructField
+	create  struct {
+		// "num int32, name string, ..."
+		nameTypeStr string
+		// {{"fooID", "rowid"}, {"fooName", "Name"}, {"fooNum", "Num"}, ...}
+		idxList idxListType
 	}
-	return
-}
-
-func valueInterfaceList(recVl reflect.Value, sfList []reflect.StructField) (list []interface{}) {
-	vlist := valueList(recVl, sfList)
-	for _, v := range vlist {
-		list = append(list, v.Interface())
+	insert struct {
+		// "num, name, ..."
+		nameStr string
+		// {"num", "name", ...}
+		nameList strListType
+		// "?, ?, ..."; one mark for each field
+		qmStr  string
+		sfList sfListType
 	}
-	return
-}
-
-func valueInterfaceAddrList(recVl reflect.Value, sfList []reflect.StructField) (list []interface{}) {
-	vlist := valueList(recVl, sfList)
-	for _, v := range vlist {
-		list = append(list, v.Addr().Interface())
+	sel struct {
+		// "rowid, num, name, ..."
+		nameStr string
+		// Includes ID if present in structure
+		sfList sfListType
+		// {"int64", "bigint", "string", ...}
+		typeStrList strListType
 	}
-	return
 }
 
-func idxListAppend(listPtr *[]idxType, nameStr, fldStr string) {
-	*listPtr = append(*listPtr, idxType{nameStr, fldStr})
-}
-
-// dscFromType collects meta information, for example field types and SQL
+// describe collects meta information, for example field types and SQL
 // names, from the passed-in record.
-func (db *DbType) dscFromType(recTp reflect.Type, primaryKeyRequired bool) (dsc dscType) {
-	if db.err != nil {
-		return
+func describe(recTp reflect.Type) (dsc DscType, err error) {
+	errorstr := func(str string) {
+		err = errors.New(str)
+	}
+	errorf := func(fmtStr string, args ...interface{}) {
+		err = fmt.Errorf(fmtStr, args...)
 	}
 	if recTp.Kind() == reflect.Struct {
-		var typeOk, ok bool
-		dsc, ok = db.dscMap[recTp]
-		if !ok {
-			dsc.recTp = recTp
-			var sfList []reflect.StructField
-			var primaryStr, sqlStr, tblStr, typeStr string
-			var fldTp reflect.Type
-			var selList, qmList, createList []string
-			dsc.nameMap = make(map[string]reflect.StructField)
-			for j := 0; j < recTp.NumField(); j++ {
-				sfList = append(sfList, recTp.Field(j))
-			}
-			var indexed bool
-			for _, sf := range sfList {
-				if db.err == nil {
-					indexed = len(sf.Tag.Get("db_index")) > 0
-					// Note on indexes. In the future, if this package gains support for
-					// multi-field indexes, the db_index tag can have strings such as "a+01",
-					// "a-02", etc. Here, "a" will be the index, the sort order of the key
-					// segment will be specified by "-" (descending) or "+" (ascending) and
-					// the significance of the key will be determined by sorting the following
-					// text (here, "01" and "02", but any text could be used).
-					fldTp = sf.Type
-					sqlStr = sf.Tag.Get("db")
-					if len(sqlStr) > 0 {
-						if sqlStr == "*" {
-							sqlStr = sf.Name
-						}
-						// fmt.Printf("Processing field of type %s\n", fldTp.String())
-						typeStr, typeOk = typeMap[fldTp.String()]
-						if typeOk {
-							dsc.nameMap[sqlStr] = sf
-							strListAppend(&createList, "%s %s", sqlStr, typeStr)
-							if indexed {
-								idxListAppend(&dsc.create.idxList, sf.Name, sqlStr)
-							}
-							dsc.insert.sfList = append(dsc.insert.sfList, sf)
-							strListAppend(&dsc.insert.nameList, "%s", sqlStr)
-							strListAppend(&qmList, "?")
-							strListAppend(&dsc.sel.typeStrList, "%s", typeStr)
-							strListAppend(&selList, "%s", sqlStr)
-							dsc.sel.sfList = append(dsc.sel.sfList, sf)
-						} else {
-							db.lclSetErrorf("database does not support fields of type %s", fldTp.String())
-						}
-					} else {
-						primaryStr = sf.Tag.Get("db_primary")
-						if len(primaryStr) > 0 {
-							if !dsc.idPresent {
-								if fldTp.Kind() == reflect.Int64 {
-									strListAppend(&selList, "rowid") // Warning: SQLite3ism
-									dsc.sel.sfList = append(dsc.sel.sfList, sf)
-									strListAppend(&dsc.sel.typeStrList, "%v", sf.Type.Kind())
-									dsc.idSf = sf
-									dsc.idPresent = true
-								} else {
-									db.lclSetErrorf("expecting int64 for id, got %v", fldTp.Kind())
-								}
-							} else {
-								db.lclSetErrorf(`multiple occurrence of "db_primary" tag`)
-							}
-						}
+		var typeOk bool
+		dsc.recTp = recTp
+		var sfList sfListType
+		var primaryStr, sqlStr, tblStr, typeStr string
+		var fldTp reflect.Type
+		var selList, qmList, createList strListType
+		dsc.nameMap = make(map[string]reflect.StructField)
+		for j := 0; j < recTp.NumField(); j++ {
+			sfList.append(recTp.Field(j))
+		}
+		var indexed bool
+		for _, sf := range sfList {
+			if err == nil {
+				indexed = len(sf.Tag.Get("db_index")) > 0
+				// Note on indexes. In the future, if this package gains support for
+				// multi-field indexes, the db_index tag can have strings such as "a+01",
+				// "a-02", etc. Here, "a" will be the index, the sort order of the key
+				// segment will be specified by "-" (descending) or "+" (ascending) and
+				// the significance of the key will be determined by sorting the following
+				// text (here, "01" and "02", but any text could be used).
+				fldTp = sf.Type
+				sqlStr = sf.Tag.Get("db")
+				if len(sqlStr) > 0 {
+					if sqlStr == "*" {
+						sqlStr = sf.Name
 					}
-					if db.err == nil {
-						tblStr = sf.Tag.Get("db_table")
-						if len(tblStr) > 0 {
-							if len(dsc.tblStr) == 0 {
-								dsc.tblStr = tblStr
+					// fmt.Printf("Processing field of type %s\n", fldTp.String())
+					typeStr, typeOk = typeMap[fldTp.String()]
+					if typeOk {
+						dsc.nameMap[sqlStr] = sf
+						createList.appendf("%s %s", sqlStr, typeStr)
+						if indexed {
+							dsc.create.idxList.append(sf.Name, sqlStr)
+						}
+						dsc.insert.sfList.append(sf)
+						dsc.insert.nameList.append(sqlStr)
+						qmList.append("?")
+						dsc.sel.typeStrList.append(typeStr)
+						selList.append(sqlStr)
+						dsc.sel.sfList.append(sf)
+					} else {
+						errorf("database does not support fields of type %s", fldTp.String())
+					}
+				} else {
+					primaryStr = sf.Tag.Get("db_primary")
+					if len(primaryStr) > 0 {
+						if !dsc.idPresent {
+							if fldTp.Kind() == reflect.Int64 {
+								selList.append("rowid") // Warning: SQLite3ism
+								dsc.sel.sfList.append(sf)
+								dsc.sel.typeStrList.appendf("%v", sf.Type.Kind())
+								dsc.idSf = sf
+								dsc.idPresent = true
 							} else {
-								db.lclSetErrorf(`multiple occurrence of "db_table" tag`)
+								errorf("expecting int64 for id, got %v", fldTp.Kind())
 							}
+						} else {
+							errorstr(`multiple occurrence of "db_primary" tag`)
 						}
 					}
 				}
-			}
-			if db.err == nil {
-				if len(dsc.insert.sfList) == 0 {
-					db.lclSetErrorf(`no structure fields have "db" tag`)
-				} else if len(dsc.tblStr) == 0 {
-					db.lclSetErrorf(`missing "db_table" tag`)
-				} else {
-					dsc.insert.qmStr = strings.Join(qmList, ", ")
-					dsc.insert.nameStr = strings.Join(dsc.insert.nameList, ", ")
-					dsc.create.nameTypeStr = strings.Join(createList, ", ")
-					dsc.sel.nameStr = strings.Join(selList, ", ")
-					db.dscMap[recTp] = dsc // cache
-					// dump(dsc)
+				if err == nil {
+					tblStr = sf.Tag.Get("db_table")
+					if len(tblStr) > 0 {
+						if len(dsc.tblStr) == 0 {
+							dsc.tblStr = tblStr
+						} else {
+							errorstr(`multiple occurrence of "db_table" tag`)
+						}
+					}
 				}
 			}
 		}
-		if primaryKeyRequired && !dsc.idPresent {
-			db.lclSetErrorf(`primary key is required but is not present in structure`)
+		if err == nil {
+			if len(dsc.insert.sfList) == 0 {
+				errorstr(`at least one exported structure field must have "db" tag`)
+			} else if len(dsc.tblStr) == 0 {
+				errorstr(`missing "db_table" tag`)
+			} else {
+				dsc.insert.qmStr = qmList.join()
+				dsc.insert.nameStr = dsc.insert.nameList.join()
+				dsc.create.nameTypeStr = createList.join()
+				dsc.sel.nameStr = selList.join()
+				// dump(dsc)
+			}
 		}
 	} else {
-		db.lclSetErrorf(`specified address must be of structure with ` +
+		errorstr(`specified address must be of structure with ` +
 			`one or more fields that have a "db" tag`)
 	}
 	return
 }
 
-// Function dsc collects meta information, for example field types and SQL
-// names, from the passed-in record.
-func (db *DbType) dscFromPtr(recPtr interface{}, primaryKeyRequired bool) (dsc dscType) {
+// SelectStr returns a command string suitable for retrieving records from the
+// database table that is associated with the receiver. tailStr is any SQL that
+// can follow the main select portion of the command. Parameters are indicated
+// by a question mark and will be included, in the same order, in the call to
+// SelectArg().
+func (dsc DscType) SelectStr(tailStr string) string {
+	return fmt.Sprintf("SELECT %s FROM %s%s;",
+		dsc.sel.nameStr, dsc.tblStr, prePad(tailStr))
+}
+
+// SelectArg returns a slice of interface values, one for each table field,
+// that can be expanded in an SQL query call. This function needs to be called
+// once for each selected record variable. Consequently, this function can be
+// called once with a record declared outside of a retrieval loop. Within the
+// loop, calls to Scan() with the expanded interface slice will repeatedly
+// update the same record.
+func (dsc DscType) SelectArg(recPtr interface{}) (argList []interface{}, err error) {
 	ptrVl := reflect.ValueOf(recPtr)
 	kd := ptrVl.Kind()
 	if kd == reflect.Ptr {
-		return db.dscFromType(ptrVl.Elem().Type(), primaryKeyRequired)
-	}
-	db.lclSetErrorf("expecting record pointer, got %v", kd)
-	return
-}
-
-func strListAppend(listPtr *[]string, fmtStr string, args ...interface{}) {
-	*listPtr = append(*listPtr, fmt.Sprintf(fmtStr, args...))
-}
-
-// TableCreate creates a table and its associated indexes based strictly on the
-// "db", "db_table", and "db_index" tags in the type definition of the
-// specified record. The table and indexes are overwritten if they already
-// exist.
-func (db *DbType) TableCreate(recPtr interface{}) {
-	db.enter()
-	if db.err == nil {
-		// DROP TABLE IF EXISTS foo
-		// DROP INDEX IF EXISTS fooID;
-		// DROP INDEX IF EXISTS fooDate;
-		// CREATE TABLE foo (num int32, name string)
-		// CREATE INDEX fooID ON foo (rowid);
-		// CREATE INDEX fooDate ON foo (Date);
-		var dsc dscType
-		// fmt.Printf("Trace 1 %v\n", db.trace)
-		dsc = db.dscFromPtr(recPtr, false)
-		if db.err == nil {
-			// fmt.Printf("Trace 2 %v\n", db.trace)
-			// Consider supporting flag that controls how existing table is handled
-			// (function fail or table overwritten)
-			// db.transactBegin()
-			if db.err == nil {
-				// fmt.Printf("Trace 3 %v\n", db.trace)
-				cmd := fmt.Sprintf("DROP TABLE IF EXISTS %s;", dsc.tblStr)
-				_ = db.lclExec(cmd)
-				// fmt.Printf("Trace 4 %v\n", db.trace)
-				for _, idx := range dsc.create.idxList {
-					cmd = fmt.Sprintf("DROP INDEX IF EXISTS %s%s;", dsc.tblStr, idx.nameStr)
-					_ = db.lclExec(cmd)
-				}
-				if db.err == nil {
-					cmd = fmt.Sprintf("CREATE TABLE %s (%s);", dsc.tblStr, dsc.create.nameTypeStr)
-					// fmt.Printf("dbmap [%s]\n", cmd)
-					_ = db.lclExec(cmd)
-					for _, idx := range dsc.create.idxList {
-						cmd = fmt.Sprintf("CREATE INDEX %s%s ON %s (%s);",
-							dsc.tblStr, idx.nameStr, dsc.tblStr, idx.fldStr)
-						// fmt.Printf("dbmap [%s]\n", cmd)
-						_ = db.lclExec(cmd)
-					}
-					// fmt.Printf("%s\n", strIf(db.lclOK(), "OK", "Not OK"))
-				}
+		recVl := ptrVl.Elem()
+		if recVl.Type() == dsc.recTp {
+			var sf reflect.StructField
+			for _, sf = range dsc.sel.sfList {
+				argList = append(argList, recVl.FieldByIndex(sf.Index).Addr().Interface())
 			}
-			// db.transactEnd(db.err == nil)
+		} else {
+			err = fmt.Errorf("passed in record (%s) for select does not match descriptor (%s)",
+				recVl.Type().String(), dsc.recTp.String())
 		}
+	} else {
+		err = errors.New("passed-in value must be a structure pointer")
 	}
-	db.leave()
 	return
 }
 
-// Update updates the specified record in the database. The ID field (tagged
-// with "db_table" in the structure definition) is used to identify the record
-// in the table. It must have the same value as it had when the record was
-// retrieved from the database using Retrieve. fldNames specify the fields that
-// will be updated. The field names are the ones used in the database, that is,
-// the names identified with the "db" tag in the structure definition. If the
-// first string is "*", all fields are updated. Unmatched field names result in
-// an error.
-func (db *DbType) Update(recPtr interface{}, fldNames ...string) {
-	db.enter()
-	if db.err == nil {
-		// UPDATE foo SET name = ?, num = ? WHERE rowid = ?;
-		if len(fldNames) > 0 {
-			var dsc dscType
-			dsc = db.dscFromPtr(recPtr, true)
-			if db.err == nil {
-				recVl := reflect.ValueOf(recPtr).Elem()
-				addr := recVl.UnsafeAddr()
-				var args []interface{}
-				var eqList []string
-				var sf reflect.StructField
-				if fldNames[0] == "*" {
-					fldNames = dsc.insert.nameList
-				}
-				pos := 0
-				for _, nm := range fldNames {
+// CreateStr returns a command string suitable for creating the database table
+// that is associated with the receiver.
+func (dsc DscType) CreateStr() string {
+	return fmt.Sprintf("CREATE TABLE %s (%s);", dsc.tblStr, dsc.create.nameTypeStr)
+}
+
+func (dsc DscType) updateNames(fldNames ...string) []string {
+	if len(fldNames) == 0 {
+		fldNames = dsc.insert.nameList
+	} else if fldNames[0] == "*" {
+		fldNames = dsc.insert.nameList
+	}
+	return fldNames
+}
+
+// UpdateStr returns a command string suitable for updating records into
+// the table associated with the receiver.
+func (dsc DscType) UpdateStr(fldNames ...string) string {
+	fldNames = dsc.updateNames(fldNames...)
+	var eqList strListType
+	for _, nm := range fldNames {
+		// fmt.Printf("sf.Name [%s], %v\n", sf.Name, fldMap[sf.Name])
+		eqList.appendf("%s = ?", nm)
+	}
+	return fmt.Sprintf("UPDATE %s SET %s WHERE rowid = ?;", dsc.tblStr, eqList.join())
+}
+
+// UpdateArg returns a slice of interface values that can be expanded in an SQL
+// call. This function needs to be called once for each updated record. The
+// passed-in val can be a properly tagged structure variable or a pointer to
+// one. Additionally, the field names that are passed in must be the same ones,
+// in the same order, as passed to UpdateStr(). The record to update is
+// identified by the field tagged 'db_primary'. That field must contain the
+// same identifier as it had when retrieved from the database.
+func (dsc DscType) UpdateArg(rec interface{}, fldNames ...string) (argList []interface{}, err error) {
+	if dsc.idPresent {
+		vl := reflect.ValueOf(rec)
+		if vl.Kind() == reflect.Ptr {
+			vl = vl.Elem()
+		}
+		if vl.Type() == dsc.recTp {
+			fldNames = dsc.updateNames(fldNames...)
+			// var list sfListType
+			var ok bool
+			var sf reflect.StructField
+			for _, nm := range fldNames {
+				// See InsertArg for correct way of doing this
+				if err == nil {
 					// fmt.Printf("sf.Name [%s], %v\n", sf.Name, fldMap[sf.Name])
-					pos++
-					sf = dsc.nameMap[nm]
-					strListAppend(&eqList, "%s = ?", nm)
-					args = append(args, reflect.Indirect(
-						reflect.NewAt(sf.Type, unsafe.Pointer(addr+sf.Offset))).Interface())
+					sf, ok = dsc.nameMap[nm]
+					if ok {
+						argList = append(argList, vl.FieldByIndex(sf.Index).Interface())
+						// list.append(sf)
+					} else {
+						err = fmt.Errorf("field name \"%s\" not in structure", nm)
+					}
 				}
-				args = append(args, reflect.Indirect(
-					reflect.NewAt(dsc.idSf.Type, unsafe.Pointer(addr+dsc.idSf.Offset))).Interface())
-				db.transactBegin()
-				if db.err == nil {
-					cmd := fmt.Sprintf("UPDATE %s SET %s WHERE rowid = ?;", dsc.tblStr,
-						strings.Join(eqList, ", "))
-					// fmt.Println(cmd)
-					_ = db.lclExec(cmd, args...)
-				}
-				db.transactEnd(db.err == nil)
+			}
+			if err == nil {
+				argList = append(argList, vl.FieldByIndex(dsc.idSf.Index).Interface())
 			}
 		} else {
-			db.lclSetErrorf("at least one field name expected in function Update")
+			err = fmt.Errorf("value passed into update must be a structure (or pointer to a structure) "+
+				"of type %s", dsc.recTp.String())
 		}
+	} else {
+		err = errors.New("update requires structure with primary ID")
 	}
-	db.leave()
 	return
 }
 
-// Delete removes all records from the database that satisfy the specified tail
-// clause and its arguments. For example, if tailStr is empty, all records from
-// the table will be deleted.
-func (db *DbType) Delete(recPtr interface{}, tailStr string, prms ...interface{}) {
-	db.enter()
-	if db.err == nil {
-		// DELETE FROM foo WHERE a > ? AND b < ?
-		var dsc dscType
-		dsc = db.dscFromPtr(recPtr, false)
-		if db.err == nil {
-			db.transactBegin()
-			if db.err == nil {
-				cmd := fmt.Sprintf("DELETE FROM %s%s;", dsc.tblStr, prePad(tailStr))
-				_ = db.lclExec(cmd, prms...)
-			}
-			db.transactEnd(db.err == nil)
-		}
-	}
-	db.leave()
+// InsertStr returns a command string suitable for inserting new records into
+// the table associated with the receiver.
+func (dsc DscType) InsertStr() string {
+	return fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s);",
+		dsc.tblStr, dsc.insert.nameStr, dsc.insert.qmStr)
 }
 
-// Truncate removes all records from the table in the database associated with
-// the specified record pointer.
-func (db *DbType) Truncate(recPtr interface{}) {
-	db.enter()
-	if db.err == nil {
-		// DELETE FROM foo;
-		var dsc dscType
-		dsc = db.dscFromPtr(recPtr, false)
-		if db.err == nil {
-			db.transactBegin()
-			if db.err == nil {
-				cmd := fmt.Sprintf("DELETE FROM %s;", dsc.tblStr)
-				_ = db.lclExec(cmd)
-			}
-			db.transactEnd(db.err == nil)
-		}
+// InsertArg returns a slice of interface values that can be expanded in an SQL
+// call. This function needs to be called once for each inserted record. rec
+// can be a properly tagged structure variable or a pointer to one. If it is a
+// pointer and the associated structure has an ID field tagged db_primary, this
+// method also returns a function that can be called to set the record's ID
+// field.
+func (dsc DscType) InsertArg(rec interface{}) (argList []interface{}, setID func(int64), err error) {
+	vl := reflect.ValueOf(rec)
+	isPtr := vl.Kind() == reflect.Ptr
+	if isPtr {
+		vl = vl.Elem()
 	}
-	db.leave()
-}
-
-// Insert stores in the database the records included in the specified slice.
-// The value of the ID field that is tagged with "db_table" is ignored. After
-// this function returns, the ID field of each inserted record will contain the
-// indentifier assigned by the database.
-func (db *DbType) Insert(slice interface{}) {
-	db.enter()
-	if db.err == nil {
-		var dsc dscType
-		var id int64
-		var res sql.Result
-		var vList []interface{}
-		sliceVl := reflect.ValueOf(slice)
-		sliceTp := sliceVl.Type()
-		if sliceTp.Kind() == reflect.Slice {
-			count := sliceVl.Len()
-			recTp := sliceTp.Elem()
-			dsc = db.dscFromType(recTp, true)
-			if db.err == nil {
-				cmdStr := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s);",
-					dsc.tblStr, dsc.insert.nameStr, dsc.insert.qmStr)
-				// fmt.Printf("dbmap [%s]\n", cmdStr)
-				var idVal, recVl reflect.Value
-				db.transactBegin()
-				for recJ := 0; recJ < count && db.err == nil; recJ++ { // Record loop
-					recVl = sliceVl.Index(recJ)
-					vList = valueInterfaceList(recVl, dsc.insert.sfList)
-					res = db.lclExec(cmdStr, vList...)
-					if db.err == nil {
-						id, _ = res.LastInsertId()
-						idVal = reflect.Indirect(reflect.NewAt(dsc.idSf.Type,
-							unsafe.Pointer(recVl.UnsafeAddr()+dsc.idSf.Offset)))
-						idVal.SetInt(id)
-					}
+	if vl.Type() == dsc.recTp {
+		var sf reflect.StructField
+		for _, sf = range dsc.insert.sfList {
+			argList = append(argList, vl.FieldByIndex(sf.Index).Interface())
+		}
+		if dsc.idPresent && isPtr {
+			vl = vl.FieldByIndex(dsc.idSf.Index)
+			if vl.CanSet() {
+				setID = func(id int64) {
+					vl.SetInt(id)
 				}
-				db.transactEnd(db.err == nil)
 			}
-		} else {
-			db.lclSetErrorf("function Insert requires slice as first argument")
 		}
-	}
-	db.leave()
-}
 
-// Retrieve selects zero or more records of the type pointed to by slicePtr
-// from the database. The retrieved records are appended to the slice. If the
-// retrieved records are to repopulate the slice instead, assign nil to the
-// slice prior to calling this function. tailStr is intended to include a WHERE
-// clause. For every parameter token ("?", "?", etc) in the string, a
-// suitable expression list (one-based) after the tail string should be passed.
-func (db *DbType) Retrieve(slicePtr interface{}, tailStr string, prms ...interface{}) {
-	db.enter()
-	if db.err == nil {
-		var dsc dscType
-		slicePtrVl := reflect.ValueOf(slicePtr)
-		kd := slicePtrVl.Kind()
-		if kd == reflect.Ptr {
-			sliceVl := reflect.Indirect(slicePtrVl)
-			kd = sliceVl.Kind()
-			if kd == reflect.Slice {
-				sliceTp := sliceVl.Type()
-				recTp := sliceTp.Elem()
-				dsc = db.dscFromType(recTp, false)
-				if db.err == nil {
-					cmdStr := fmt.Sprintf("SELECT %s FROM %s%s;",
-						dsc.sel.nameStr, dsc.tblStr, prePad(tailStr))
-					var rows *sql.Rows
-					rows = db.lclQuery(cmdStr, prms...)
-					if db.err == nil {
-						recVl := reflect.Indirect(reflect.New(recTp)) // Buffer
-						vList := valueInterfaceAddrList(recVl, dsc.sel.sfList)
-						for rows.Next() {
-							// fmt.Printf("Next %s\n", strIf(db.lclOK(), "OK", "Not OK"))
-							if db.err == nil {
-								db.err = rows.Scan(vList...)
-								// fmt.Printf("Scan %s\n", strIf(db.lclOK(), "OK", "Not OK"))
-								if db.err == nil {
-									sliceVl = reflect.Append(sliceVl, recVl)
-								}
-							}
-						}
-						if db.err == nil {
-							// Assign sliceVl back to *slicePtr
-							reflect.Indirect(slicePtrVl).Set(sliceVl)
-						}
-					}
-				}
-			} else {
-				db.lclSetErrorf("function Retrieve expecting pointer to slice, got pointer to %v", kd)
-
-			}
-		} else {
-			db.lclSetErrorf("function Retrieve expecting pointer to slice, got %v", kd)
-		}
+	} else {
+		err = fmt.Errorf("value passed into insert must be a structure (or pointer to a structure) "+
+			"of type %s", dsc.recTp.String())
 	}
-	db.leave()
 	return
+}
+
+// TruncateStr returns a command string that will remove all records from the
+// table associated with the receiver.
+func (dsc DscType) TruncateStr() string {
+	return fmt.Sprintf("DELETE FROM %s;", dsc.tblStr)
+}
+
+// Describe generates a descriptor containing meta information of the passed-in
+// record (or record pointed to by rec). See DscType for more information. An
+// error occurs if the record stucture fails to meet the tag requirements as
+// explained in the documentation.
+func Describe(rec interface{}) (dsc DscType, err error) {
+	vl := reflect.ValueOf(rec)
+	kd := vl.Kind()
+	if kd == reflect.Ptr {
+		vl = vl.Elem()
+	}
+	dsc, err = describe(vl.Type())
+	return
+}
+
+// MustDescribe calls Describe() and panics if an error occurs.
+func MustDescribe(rec interface{}) (dsc DscType) {
+	var err error
+	dsc, err = Describe(rec)
+	if err != nil {
+		panic(err)
+	}
+	return
+}
+
+// String satisfies the fmt.Stringer interface and returns the library name
+func (dsc *DscType) String() string {
+	return "dbmap"
 }

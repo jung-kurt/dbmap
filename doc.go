@@ -19,8 +19,7 @@ Package dbmap implements a simple, high-level wrapper for the database/sql
 package. Currently, only sqlite3 (using github.com/mattn/go-sqlite3) has been
 tested. Each table in the database is associated with an application-defined
 structure in Go. These structures contain special tags that allow dbmap to
-automatically manage basic database operations. Instances of DbType are safe
-for use by multiple goroutines.
+automatically manage basic database operations.
 
 License
 
@@ -41,23 +40,20 @@ Quick Start
 The following Go code demonstrates the creation of a database, the creation of
 a table within that database, and subsequent operations.
 
-	type recType struct {
-		ID   int64  `db_primary:"*" db_table:"rec"`
-		Name string `db:"*" db_index:"*"`
+	db := dbmap.MustDescribe(recType{}).Wrap(hnd)
+	db.Create()
+	db.InsertClear()
+	var rec recType
+	for _, rec = range []recType{{0, "Athos"}, {0, "Porthos"}, {0, "Aramis"}} {
+		db.Insert(rec)
 	}
-	db := dbmap.DbCreate("data/example.db")
-	db.TableCreate(&recType{})
-	db.Insert([]recType{{0, "Athos"}, {0, "Porthos"}, {0, "Aramis"}})
-	var list []recType
-	db.Retrieve(&list, "WHERE Name LIKE ? ORDER BY Name", "A%")
-	fmt.Println(db)
-	for _, r := range list {
-		fmt.Println(r.Name)
+	db.Query(&rec, "WHERE Name LIKE ? ORDER BY Name", "A%")
+	for db.Next() {
+		fmt.Println(rec.Name)
 	}
-	db.Close()
-	if db.Err() {
-		fmt.Println(db.Error())
-	}
+	// Output:
+	// Aramis
+	// Athos
 
 See the "Structure field tags" section for an explanation of the field tags.
 
@@ -66,17 +62,23 @@ documentation) for other operations.
 
 Errors
 
-If an error occurs in a dbmap method, an internal error field is set. After this
-occurs, dbmap method calls typically return without performing any operations and
-the error state is retained. This error management scheme facilitates database
-operations since individual method calls do not need to be examined for
-failure; it is generally sufficient to wait until after Close() is called. For
-the same reason, if an error occurs in the calling application during the
-database session, it may be desirable for the application to transfer the error
-to the dbmap instance by calling the SetError() method or the SetErrorf() method.
-At any time during the life cycle of the dbmap instance, the error state can be
-determined with a call to OK() or Err(). The error itself can be retrieved with
-a call to Error().
+This package exposes two method receiver types, DscType and WrapType. Of the
+two, DscType performs lower level functions and its methods return errors
+directly. Instances of this type are safe for use by multiple goroutines.
+
+The methods of WrapType hide the details of using DscType and facilitates error
+management. Instances of this type are not safe for shared use. If an error
+occurs in a WrapType method, an internal error field is set. After this
+happens, WrapType method calls typically return without performing any
+operations and the error state is retained. This error management scheme
+simplifies database operations since individual method calls do not need to be
+examined for failure; it is generally sufficient to wait until after the last
+WrapType method is called in a function. For the same reason, if an error
+occurs in the calling application during the database session, it may be
+desirable for the application to transfer the error to the WrapType instance by
+calling the SetError() method or the SetErrorf() method. At any time during the
+life cycle of the WrapType instance, the error state can be determined with a
+call to OK(). The error itself can be retrieved with a call to Err().
 
 Structure field tags
 
@@ -91,7 +93,7 @@ If updates or insertions will be performed with a structure, it needs to have a
 unique record identifier maintained by the database.
 
 If a managed field does not have a "db_primary" tag, it must have a "db" tag
-that identfies the column name used in the database. If the tag value is an
+that identifies the column name used in the database. If the tag value is an
 asterisk, the field name itself will be used.
 
 A field with an optional "db_index" tag will be indexed. Currently only single
@@ -99,8 +101,9 @@ field indexes are supported.
 
 Limitations
 
-This wrapper to database/sql does not currently support table joins or table
-alterations.
+This wrapper to database/sql does not currently support table alterations. It
+does not directly support table joins but it can read database views (which in
+turn can include joins).
 
 */
 package dbmap

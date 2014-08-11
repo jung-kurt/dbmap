@@ -1,431 +1,382 @@
-/*
- * Copyright (c) 2014 Kurt Jung (Gmail: kurt.w.jung)
- *
- * Permission to use, copy, modify, and distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
- * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
- * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
- * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
- */
-
 package dbmap_test
 
 import (
 	"code.google.com/p/dbmap"
-	"crypto/sha1"
+	"crypto/md5"
 	"database/sql"
+	"encoding/base64"
 	"fmt"
 	_ "github.com/mattn/go-sqlite3"
-	"io/ioutil"
 	"os"
+	"strings"
 )
 
-// This example demonstrates a simple use of dbmap. In the call to Retrieve(),
-// each question mark is replaced with a quoted and escaped expression result.
-// The "db_index" tag is used to index the table by the associated field. Here,
-// one index is based on the the Name field.
-func ExampleDbType_01() {
+const dbFileStr = "data/example.db"
+
+type recType struct {
+	ID  int64  `db_primary:"*" db_table:"rec"`
+	Str string `db:"*" db_index:"*"`
+	Num int64  `db:"num" db_index:"*"`
+}
+
+var glRecDsc = dbmap.MustDescribe(recType{})
+
+func errf(fmtStr string, args ...interface{}) {
+	fmt.Fprintf(os.Stderr, fmtStr, args...)
+}
+
+func hashStr(v int64) string {
+	data := md5.Sum([]byte(fmt.Sprintf("*%d*", v)))
+	return base64.StdEncoding.EncodeToString(data[:])
+}
+
+// This example demonstrates a simple use of dbmap. In typical scenarios, the
+// record type would be defined, and MustDescribe() called, outside of the
+// function in which database operations would be performed.
+func ExampleDbMapType_01() {
 	type recType struct {
 		ID   int64  `db_primary:"*" db_table:"rec"`
 		Name string `db:"*" db_index:"*"`
 	}
-	db := dbmap.DbCreate("data/example.db")
-	db.TableCreate(&recType{})
-	db.Insert([]recType{{0, "Athos"}, {0, "Porthos"}, {0, "Aramis"}})
-	var list []recType
-	db.Retrieve(&list, "WHERE Name LIKE ? ORDER BY Name", "A%")
-	fmt.Println(db)
-	for _, r := range list {
-		fmt.Println(r.Name)
+	os.Remove(dbFileStr)
+	hnd, err := sql.Open("sqlite3", dbFileStr)
+	if err == nil {
+		db := dbmap.MustDescribe(recType{}).Wrap(hnd)
+		db.Create()
+		db.InsertClear()
+		var rec recType
+		for _, rec = range []recType{{0, "Athos"}, {0, "Porthos"}, {0, "Aramis"}} {
+			db.Insert(rec)
+		}
+		db.Query(&rec, "WHERE Name LIKE ? ORDER BY Name", "A%")
+		for db.Next() {
+			fmt.Println(rec.Name)
+		}
+		hnd.Close()
+		err = db.Err()
 	}
-	db.Close()
-	if db.Err() {
-		fmt.Println(db.Error())
+	if err != nil {
+		fmt.Println(err)
 	}
 	// Output:
-	// dbmap
 	// Aramis
 	// Athos
 }
 
-// This example demonstrates the use of blobs in dbmap.
-func ExampleDbType_02() {
-	type recType struct {
-		ID      int64  `db_primary:"*" db_table:"image"`
-		Img     []byte `db:"*"`
-		FileStr string `db:"*"`
-	}
-	var rec recType
+// This example demonstrates dbmap with table creation, transactions,
+// insertions, deletions and select queries. Typically, since an sql.DB
+// instance is safe for multiple goroutines, opening and closing the database
+// would occur outside of the function where dbmap functions are used.
+func ExampleDbMapType_02() {
+	var hnd *sql.DB
 	var err error
-	rec.FileStr = "dbmap.jpg"
-	rec.Img, err = ioutil.ReadFile(rec.FileStr)
-	if err == nil {
-		chksum := sha1.Sum(rec.Img)
-		db := dbmap.DbCreate("data/example.db")
-		db.TableCreate(&rec)
-		db.Insert([]recType{rec})
-		var list []recType
-		db.Retrieve(&list, "WHERE FileStr = ?", rec.FileStr)
-		if len(list) == 1 {
-			if chksum == sha1.Sum(list[0].Img) {
-				fmt.Printf("%s, SHA1: %v, length: %d\n",
-					rec.FileStr, chksum, len(rec.Img))
-			}
-		}
-		db.Close()
-		err = db.Error()
-	}
-	if err != nil {
-		fmt.Println(err)
-	}
-	// Output:
-	// dbmap.jpg, SHA1: [25 171 91 242 2 67 216 162 57 97 225 97 3 26 37 177 213 194 45 59], length: 3780
-}
-
-// This example demonstrates the reopening of a db database.
-//
-// This example shows the optional provision of names in the "db" field tags.
-// The tag values are used as field names by the db database. This feature is
-// generally useful only if the db database is used by multiple applications.
-// It is these names rather than the names in the Go structure that are used in
-// expressions passed to Retrieve() and for limiting fields to be updated in
-// Update().
-//
-// Notice that the type of the expressions for the ? parameters need to match
-// the type of the group_num field (in this case int64).
-//
-// The Retrieve function appends selection results to the passed-in slice. If
-// you wish to repopulate the slice, empty it prior to calling Retrieve by
-// assigning nil to it.
-func ExampleDbType_03() {
-	dbFileStr := "data/example.db"
-	type recType struct {
-		ID   int64  `db_primary:"*" db_table:"rec"`
-		Name string `db:"last_name"`
-		Num  int64  `db:"group_num"`
-		Val  int    // exported but not managed by db
-		val  int    // not exported
-	}
-	db := dbmap.DbCreate(dbFileStr)
-	db.TableCreate(&recType{})
-	var list []recType
-	for j := 0; j < 1024; j++ {
-		list = append(list, recType{0, fmt.Sprintf("*** %4d ***", j),
-			int64(j), j * 2, j * 4})
-	}
-	db.Insert(list)
-	db.Close()
-	if db.OK() {
-		db := dbmap.DbOpen(dbFileStr)
-		list = nil // Reuse the slice but empty it first
-		db.Retrieve(&list, "WHERE group_num > ? AND group_num < ? ORDER BY group_num",
-			int64(1000), int64(1004))
-		for _, r := range list {
-			fmt.Printf("%s %d %d %d\n", r.Name, r.Num, r.Val, r.val)
-		}
-		db.Close()
-	}
-	if db.Err() {
-		fmt.Println(db.Error())
-	}
-	// Output:
-	// *** 1001 *** 1001 0 0
-	// *** 1002 *** 1002 0 0
-	// *** 1003 *** 1003 0 0
-}
-
-// This example demonstrates a record update. In the first call to Update(),
-// only fields B and C are updated. In the second call, all fields are updated.
-func ExampleDbType_04() {
-	type recType struct {
-		ID      int64 `db_primary:"*" db_table:"rec"`
-		A, B, C int64 `db:"*"`
-	}
-	var rec recType
-	db := dbmap.DbCreate("data/example.db")
-	db.TableCreate(&recType{})
-	adjust := func() {
-		rec.A += 1000
-		rec.B += 1000
-		rec.C += 1000
-	}
-	retrieve := func() {
-		var rl []recType
-		// fmt.Printf("Rec ID %d\n", rec.ID)
-		db.Retrieve(&rl, "WHERE rowid = ?", rec.ID)
-		if len(rl) > 0 {
-			for _, r := range rl {
-				fmt.Printf("%d %d %d\n", r.A, r.B, r.C)
-			}
-
-		}
-	}
-	var list []recType
-	for j := int64(0); j < 10; j++ {
-		list = append(list, recType{0, j, j + 1, j + 2})
-	}
-	db.Insert(list)
-	list = nil
-	db.Retrieve(&list, "WHERE A = ?", int64(2))
-	if len(list) > 0 {
-		rec = list[0]
-		adjust()
-		db.Update(&rec, "B", "C") // Update only B and C in the database
-		retrieve()
-		adjust()
-		db.Update(&rec, "*") // Update all fields
-		retrieve()
-	}
-	db.Close()
-	if db.Err() {
-		fmt.Println(db.Error())
-	}
-	// Output:
-	// 2 1003 1004
-	// 2002 2003 2004
-}
-
-// This example demonstrates record deletion.
-func ExampleDbType_05() {
-	type recType struct {
-		ID      int64 `db_primary:"*" db_table:"rec"`
-		A, B, C int64 `db:"*"`
-	}
-	db := dbmap.DbCreate("data/example.db")
-	show := func(str string) {
-		var rs []recType
-		db.Retrieve(&rs, "ORDER BY A")
-		fmt.Printf("%s\n", str)
-		for _, r := range rs {
-			fmt.Printf("%d %d %d\n", r.A, r.B, r.C)
-		}
-	}
-	db.TableCreate(&recType{})
-	var list []recType
-	for j := int64(0); j < 5; j++ {
-		list = append(list, recType{0, j, j + 1, j + 2})
-	}
-	db.Insert(list)
-	show("All records after Insert()")
-	db.Delete(&recType{}, "WHERE A = ? OR A = ?", int64(0), int64(4))
-	show("All records after Delete()")
-	db.Close()
-	if db.Err() {
-		fmt.Println(db.Error())
-	}
-	// Output:
-	// All records after Insert()
-	// 0 1 2
-	// 1 2 3
-	// 2 3 4
-	// 3 4 5
-	// 4 5 6
-	// All records after Delete()
-	// 1 2 3
-	// 2 3 4
-	// 3 4 5
-}
-
-// This example demonstrates table truncation.
-func ExampleDbType_06() {
-	type recType struct {
-		ID      int64 `db_primary:"*" db_table:"rec"`
-		A, B, C int64 `db:"*"`
-	}
-	db := dbmap.DbCreate("data/example.db")
-	show := func(str string) {
-		var rs []recType
-		db.Retrieve(&rs, "ORDER BY A")
-		fmt.Printf("%s\n", str)
-		for _, r := range rs {
-			fmt.Printf("%d %d %d\n", r.A, r.B, r.C)
-		}
-	}
-	db.TableCreate(&recType{})
-	var list []recType
-	for j := int64(0); j < 5; j++ {
-		list = append(list, recType{0, j, j + 1, j + 2})
-	}
-	db.Insert(list)
-	show("All records after Insert()")
-	db.Truncate(&recType{})
-	show("All records after Truncate()")
-	db.Close()
-	if db.Err() {
-		fmt.Println(db.Error())
-	}
-	// Output:
-	// All records after Insert()
-	// 0 1 2
-	// 1 2 3
-	// 2 3 4
-	// 3 4 5
-	// 4 5 6
-	// All records after Truncate()
-}
-
-// This example demonstrates using db to open and close the database. This
-// could be useful if the db database needs to be opened with special options.
-func ExampleDbType_07() {
-	dbFileStr := "data/example.db"
-	type recType struct {
-		ID      int64 `db_primary:"*" db_table:"sample"`
-		A, B, C int64 `db:"*"`
-	}
+	var j int64
 	os.Remove(dbFileStr)
-	hnd, err := sql.Open("sqlite3", dbFileStr)
+	hnd, err = sql.Open("sqlite3", dbFileStr)
 	if err == nil {
-		db := dbmap.DbSetHandle(hnd)
-		db.TableCreate(&recType{})
-		var list []recType
-		for j := int64(0); j < 3; j++ {
-			list = append(list, recType{0, j, j + 1, j + 2})
+		var rec recType
+		db := glRecDsc.Wrap(hnd)
+		db.TransactionBegin()
+		db.Create()
+		db.InsertClear()
+		for j = 4100; j < 4200; j++ {
+			rec.Num = j
+			rec.Str = hashStr(j)
+			db.Insert(&rec)
 		}
-		db.Retrieve(&list, "ORDER BY A DESC")
-		for _, r := range list {
-			fmt.Printf("%d %d %d\n", r.A, r.B, r.C)
+		db.TransactionEnd()
+		db.TransactionBegin()
+		db.Query(&rec, "WHERE num > ? AND num < ?", 4151, 4155)
+		for db.Next() {
+			rec.Str = "*" + rec.Str + "*"
+			db.Update(rec, "Str")
+		}
+		db.TransactionEnd()
+		db.Delete("WHERE num = ?", 4153)
+		db.Query(&rec, "WHERE num > ? AND num < ?", 4150, 4156)
+		for db.Next() {
+			fmt.Printf("Got [%04d][%s]\n", rec.Num, rec.Str)
 		}
 		hnd.Close()
-		err = db.Error()
+		err = db.Err()
 	}
 	if err != nil {
 		fmt.Println(err)
 	}
 	// Output:
-	// 0 1 2
-	// 1 2 3
-	// 2 3 4
+	// Got [4151][ff5EcTiTnmf0KZOJPM7CzA==]
+	// Got [4152][*PJwbEyUPk33FwwnWLOLZfw==*]
+	// Got [4154][*vZ83nzcp7LwW1F/Rm3km9w==*]
+	// Got [4155][SiIpgI5rXRYy1RAjJBd7xw==]
 }
 
-// This example is a menagerie of calls that exercise various failure code
-// paths. It is a catchall of routines needed for complete test coverage using
-// the go cover tool.
-func ExampleDbType_08() {
-	type recType struct {
-		ID      int64 `db_primary:"*" db_table:"rec"`
-		A, B, C int64 `db:"*"`
+// This example demonstrates creating and selecting from a view. Note that
+// WrapJoin is called to associate the database handle, error condition and
+// transaction handle with a previously instantiated WrapType variable. This
+// allows transactions to manage multiples tables and facilitates error
+// handling.
+func ExampleDbMapType_03() {
+	type authorType struct {
+		ID   int64  `db_primary:"*" db_table:"author"`
+		Name string `db:"*"`
 	}
-	var db *dbmap.DbType
-	report := func() {
-		if db.Err() {
-			fmt.Println(db.Error())
+	type titleType struct {
+		ID       int64  `db_primary:"*" db_table:"title"`
+		AuthorID int64  `db:"*"`
+		Name     string `db:"*"`
+	}
+	type authorTitleType struct {
+		Author string `db:"*" db_table:"author_title"`
+		Title  string `db:"*"`
+	}
+	var hnd *sql.DB
+	var err error
+	os.Remove(dbFileStr)
+	hnd, err = sql.Open("sqlite3", dbFileStr)
+	if err == nil {
+		atDb := dbmap.MustDescribe(authorTitleType{}).Wrap(hnd)
+		tDb := dbmap.MustDescribe(titleType{}).WrapJoin(atDb)
+		aDb := dbmap.MustDescribe(authorType{}).WrapJoin(atDb)
+		tDb.Create()
+		aDb.Create()
+		_, err = hnd.Exec("CREATE VIEW author_title AS SELECT a.Name AS Author, " +
+			"t.Name as Title FROM author a, title t WHERE a.rowid = t.AuthorID")
+		atDb.SetError(err)
+		atDb.TransactionBegin()
+		for _, str := range []string{"William Faulkner/Go Down, Moses/The Bear",
+			"Mark Twain/Huckleberry Finn/Life on the Mississippi"} {
+			list := strings.Split(str, "/")
+			var author authorType
+			var title titleType
+			for j, str := range list {
+				if j == 0 {
+					author.Name = str
+					aDb.Insert(&author)
+				} else {
+					title.AuthorID = author.ID
+					title.Name = str
+					tDb.Insert(&title)
+				}
+			}
 		}
-		db.ClearError()
+		atDb.TransactionEnd()
+		var atRec authorTitleType
+		atDb.Query(&atRec, "ORDER BY Author, Title")
+		for atDb.Next() {
+			fmt.Printf("%s / %s\n", atRec.Author, atRec.Title)
+		}
+		hnd.Close()
+		err = atDb.Err()
 	}
-	var rl []recType
-	var rec recType
-	db = dbmap.DbCreate("data/foo/bar/baz/example.db")
-	db.Close()
-	report()
-	os.RemoveAll("data/foo")
-	db = dbmap.DbCreate("data/example.db")
-	db.TableCreate(&rec)
-	// db.TransactBegin()
-	db.Retrieve(&rl, "")
-	// db.TransactRollback()
-	db.SetErrorf("application %s", "error")
-	err := db.Error()
-	// The following several calls exercise the quick return on existing error
-	// condition
-	db.Exec("foo")
-	db.Query("foo")
-	db.TableCreate(&rec)
-	db.Update(&rec)
-	db.Retrieve(&rl, "")
-	db.Insert(rl)
-	db.Delete(&rec, "")
-	db.Truncate(&rec)
-	report()
-	db.SetError(err)
-	report()
-	db.Update(&rec)
-	report()
-	db.Insert(&rec)
-	report()
-	db.Retrieve(&rec, "")
-	report()
-	db.Retrieve(rec, "")
-	report()
-	// db.TransactCommit()
-	report()
-	// db.TransactRollback()
-	report()
-	db.Trace(true)
-	db.Exec("foo")
-	db.Trace(false)
-	report()
-	type aType struct {
-		ID  bool  `db_primary:"*" db_table:"a"`
-		Val int64 `db:"*"`
+	if err != nil {
+		fmt.Println(err)
 	}
-	db.TableCreate(&aType{})
-	report()
-	type bType struct {
-		ID  int64 `db_primary:"*" db_table:"b"`
-		Val int64
-	}
-	db.TableCreate(&bType{})
-	report()
-	var a int
-	db.TableCreate(a)
-	report()
-	db.TableCreate(&a)
-	report()
-	type cType struct {
-		ID  int64        `db_primary:"*" db_table:"b"`
-		Hnd dbmap.DbType `db:"*"`
-	}
-	db.TableCreate(&cType{})
-	report()
-	type dType struct {
-		ID1 int64 `db_primary:"*" db_table:"d1"`
-		ID2 int64 `db_primary:"*" db_table:"d2"`
-		Val int64 `db:"*"`
-	}
-	db.TableCreate(&dType{})
-	report()
-	type eType struct {
-		Val int64 `db:"*"`
-	}
-	db.TableCreate(&eType{})
-	report()
-	type fType struct {
-		ID  int64 `db_primary:"*" db_table:"f1"`
-		Val int64 `db:"*" db_table:"f2"`
-	}
-	db.TableCreate(&fType{})
-	report()
-	type gType struct {
-		Val1 int64 `db:"*" db_table:"g"`
-		Val2 int64 `db:"*"`
-	}
-	g := gType{1, 2}
-	db.TableCreate(&g)
-	db.Insert([]gType{g})
-	report()
 	// Output:
-	// database is closed
-	// application error
-	// application error
-	// at least one field name expected in function Update
-	// function Insert requires slice as first argument
-	// function Retrieve expecting pointer to slice, got pointer to struct
-	// function Retrieve expecting pointer to slice, got struct
-	// dbmap [--E] foo
-	// near "foo": syntax error
-	// expecting int64 for id, got bool
-	// no structure fields have "db" tag
-	// expecting record pointer, got int
-	// specified address must be of structure with one or more fields that have a "db" tag
-	// database does not support fields of type dbmap.DbType
-	// multiple occurrence of "db_primary" tag
-	// missing "db_table" tag
-	// multiple occurrence of "db_table" tag
-	// primary key is required but is not present in structure
+	// Mark Twain / Huckleberry Finn
+	// Mark Twain / Life on the Mississippi
+	// William Faulkner / Go Down, Moses
+	// William Faulkner / The Bear
+}
+
+// This example demonstrates using dbmap functions directly. The need to check
+// errors and manage statements in more detail results in much more code than
+// when the wrapped functions are used.
+func ExampleDbMapType_04() {
+	var hnd *sql.DB
+	var err error
+	os.Remove(dbFileStr)
+	hnd, err = sql.Open("sqlite3", dbFileStr)
+	if err == nil {
+		var dsc dbmap.DscType
+		dsc, err = dbmap.Describe(recType{})
+		if err == nil {
+			var tx *sql.Tx
+			tx, err = hnd.Begin()
+			if err == nil {
+				_, err = tx.Exec(dsc.CreateStr())
+			}
+			if err == nil {
+				var rec recType
+				var argList []interface{}
+				var stInsert *sql.Stmt
+				stInsert, err = tx.Prepare(dsc.InsertStr())
+				if err == nil {
+					var j int64
+					for j = 3100; j < 3200; j++ {
+						if err == nil {
+							rec.Num = j
+							rec.Str = fmt.Sprintf("%x", j)
+							argList, _, err = dsc.InsertArg(&rec)
+							if err == nil {
+								// _, err = stInsert.Exec(rec.Str, rec.Num)
+								_, err = stInsert.Exec(argList...)
+							}
+						}
+					}
+				}
+			}
+			if err == nil {
+				tx.Commit()
+			} else {
+				tx.Rollback()
+			}
+			if err == nil {
+				var rec recType
+				var argList []interface{}
+				var rows *sql.Rows
+				rows, err = hnd.Query(dsc.SelectStr("WHERE num > ? AND num < ?"), 3120, 3125)
+				if err == nil {
+					argList, err = dsc.SelectArg(&rec)
+					if err == nil {
+						for rows.Next() {
+							err = rows.Scan(argList...)
+							if err == nil {
+								fmt.Printf("Got [%s]\n", rec.Str)
+							}
+						}
+						if err == nil {
+							err = rows.Err()
+						}
+					}
+				}
+			}
+		}
+		hnd.Close()
+	}
+	if err != nil {
+		fmt.Println(err)
+	}
+	// Output:
+	// Got [c31]
+	// Got [c32]
+	// Got [c33]
+	// Got [c34]
+}
+
+// This example is the bad code emporium, full of calls to exercise errant code
+// paths to increase test coverage.
+func ExampleDbMapType_05() {
+	var hnd *sql.DB
+	var db dbmap.WrapType
+	var rec recType
+	var err error
+
+	describe := func(s string, r interface{}) {
+		dsc, err := dbmap.Describe(r)
+		if err == nil {
+			fmt.Println(s, &dsc)
+		} else {
+			fmt.Println(s, err)
+		}
+	}
+
+	func() {
+		defer func() {
+			res := recover()
+			if res != nil {
+				fmt.Println(res)
+			}
+		}()
+		_ = dbmap.MustDescribe(struct{ A int }{})
+	}()
+
+	type aType struct {
+		A int `db:"*"`
+	}
+	describe("a", aType{})
+	type bType struct {
+		ID int64 `db_table:"test"`
+		A  int64
+	}
+	describe("b", bType{})
+	type cType struct {
+		ID  int64   `db_table:"test"`
+		Hnd *sql.DB `db:"*"`
+	}
+	describe("c", cType{})
+	type dType struct {
+		ID int32 `db_table:"test" db_primary:"*"`
+		A  int32 `db:"*"`
+	}
+	describe("d", dType{})
+	type eType struct {
+		A int64 `db_table:"test" db_primary:"*"`
+		B int64 `db_primary:"*"`
+	}
+	describe("e", eType{})
+	type fType struct {
+		A int64 `db_table:"test" db_primary:"*"`
+		B int64 `db_table:"test"`
+	}
+	describe("f", fType{})
+	describe("g", describe)
+	db = glRecDsc.Wrap(nil)
+	os.Remove(dbFileStr)
+	hnd, err = sql.Open("sqlite3", dbFileStr)
+	if err == nil {
+		db = glRecDsc.Wrap(hnd)
+		fmt.Printf("%s, %s, %v, %v\n", &glRecDsc, &db, db.DB() != nil, db.OK())
+		db.TransactionBegin()
+		fmt.Printf("%v\n", db.Tx() != nil)
+		db.TransactionRollback()
+		db.TransactionBegin()
+		db.TransactionBegin()
+		fmt.Println(db.Err())
+		db.ClearError()
+		db.TransactionCommit()
+		db.TransactionEnd()
+		fmt.Println(db.Err())
+		db.ClearError()
+		db.Create()
+		db.InsertClear()
+		db.Insert(recType{Num: 1234, Str: "ABC"})
+		res := db.Result()
+		rec.Num, _ = res.RowsAffected()
+		fmt.Printf("Rows affected: %d, OK %v\n", rec.Num, db.OK())
+		db.Query(&rec, "WHERE num = ?", 1234)
+		var updRec recType
+		for db.Next() {
+			updRec = rec
+		}
+		updRec.Str = "*" + updRec.Str + "*"
+		db.Update(updRec, "Str")
+		db.Update(&updRec, "Str")
+		db.Update(updRec, "*")
+		db.Update(updRec)
+		db.SetErrorf("keyboard missing, press Escape to continue")
+		db.SetError(db.Err())
+		db.ClearError()
+		_, err = glRecDsc.SelectArg(aType{})
+		fmt.Println(err)
+		_, err = glRecDsc.SelectArg(&aType{})
+		fmt.Println(err)
+		_ = glRecDsc.TruncateStr()
+		_, _ = glRecDsc.UpdateArg(rec, "foo")
+		_, _ = glRecDsc.UpdateArg(struct{ foo int }{})
+		_, _, _ = glRecDsc.InsertArg(struct{ foo int }{})
+		type simpleType struct {
+			A string `db:"*" db_table:"simple"`
+		}
+		var simple simpleType
+		dsc, _ := dbmap.Describe(simple)
+		_, _ = dsc.UpdateArg(simple, "A")
+		_ = dbmap.MustDescribe(&recType{})
+		hnd.Close()
+	}
+	// Output:
+	// at least one exported structure field must have "db" tag
+	// a missing "db_table" tag
+	// b at least one exported structure field must have "db" tag
+	// c database does not support fields of type *sql.DB
+	// d expecting int64 for id, got int32
+	// e multiple occurrence of "db_primary" tag
+	// f multiple occurrence of "db_table" tag
+	// g specified address must be of structure with one or more fields that have a "db" tag
+	// dbmap, dbmap/wrap, true, true
+	// true
+	// nested transactions not supported
+	// no transaction to end
+	// Rows affected: 1, OK true
+	// passed-in value must be a structure pointer
+	// passed in record (dbmap_test.aType) for select does not match descriptor (dbmap_test.recType)
 }
