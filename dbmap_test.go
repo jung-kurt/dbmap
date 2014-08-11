@@ -82,7 +82,7 @@ func ExampleDscType_02() {
 		for j = 4100; j < 4200; j++ {
 			rec.Num = j
 			rec.Str = hashStr(j)
-			db.Insert(&rec)
+			db.InsertOrReplace(&rec)
 		}
 		db.TransactionEnd()
 		db.TransactionBegin()

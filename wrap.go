@@ -132,13 +132,18 @@ func (w *WrapType) InsertClear() {
 	w.insert.st = nil
 }
 
-// Insert adds the record pointed to by recPtr to the database. If the record
-// structure contains an ID field tagged with db_primary, this field will be
-// assigned an identifier by the database.
-func (w *WrapType) Insert(recPtr interface{}) {
+// Insert adds the record pointed to by recPtr to the database. If a unique
+// constraint is violated by the insertion and replace is true, the record will
+// be relaced.
+func (w *WrapType) insertOrReplace(recPtr interface{}, replace bool) {
 	if w.sharePtr.errVal == nil {
 		if w.insert.st == nil {
-			cmdStr := w.dsc.InsertStr()
+			var cmdStr string
+			if replace {
+				cmdStr = w.dsc.InsertOrReplaceStr()
+			} else {
+				cmdStr = w.dsc.InsertStr()
+			}
 			if w.sharePtr.tx == nil {
 				w.insert.st, w.sharePtr.errVal = w.sharePtr.hnd.Prepare(cmdStr)
 			} else {
@@ -165,6 +170,21 @@ func (w *WrapType) Insert(recPtr interface{}) {
 			}
 		}
 	}
+}
+
+// Insert adds the record pointed to by recPtr to the database. If the record
+// structure contains an ID field tagged with db_primary, this field will be
+// assigned an identifier by the database.
+func (w *WrapType) Insert(recPtr interface{}) {
+	w.insertOrReplace(recPtr, false)
+}
+
+// Insert adds the record pointed to by recPtr to the database. If the
+// insertion would violate a unique constraint on the table, the record will be
+// replaced. If the record structure contains an ID field tagged with
+// db_primary, this field will be assigned an identifier by the database.
+func (w *WrapType) InsertOrReplace(recPtr interface{}) {
+	w.insertOrReplace(recPtr, true)
 }
 
 // Update stores the passed-in value to the database. rec must be a properly

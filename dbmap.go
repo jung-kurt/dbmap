@@ -331,6 +331,14 @@ func (dsc DscType) InsertStr() string {
 		dsc.tblStr, dsc.insert.nameStr, dsc.insert.qmStr)
 }
 
+// InsertOrReplaceStr returns a command string suitable for inserting (or
+// replacing, if the insertion would violate a unique constraint) records into
+// the table associated with the receiver.
+func (dsc DscType) InsertOrReplaceStr() string {
+	return fmt.Sprintf("INSERT OR REPLACE INTO %s (%s) VALUES (%s);",
+		dsc.tblStr, dsc.insert.nameStr, dsc.insert.qmStr)
+}
+
 // InsertArg returns a slice of interface values that can be expanded in an SQL
 // call. This function needs to be called once for each inserted record. rec
 // can be a properly tagged structure variable or a pointer to one. If it is a
