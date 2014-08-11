@@ -33,7 +33,7 @@ func hashStr(v int64) string {
 // This example demonstrates a simple use of dbmap. In typical scenarios, the
 // record type would be defined, and MustDescribe() called, outside of the
 // function in which database operations would be performed.
-func ExampleDbMapType_01() {
+func ExampleDscType_01() {
 	type recType struct {
 		ID   int64  `db_primary:"*" db_table:"rec"`
 		Name string `db:"*" db_index:"*"`
@@ -67,7 +67,7 @@ func ExampleDbMapType_01() {
 // insertions, deletions and select queries. Typically, since an sql.DB
 // instance is safe for multiple goroutines, opening and closing the database
 // would occur outside of the function where dbmap functions are used.
-func ExampleDbMapType_02() {
+func ExampleDscType_02() {
 	var hnd *sql.DB
 	var err error
 	var j int64
@@ -115,7 +115,7 @@ func ExampleDbMapType_02() {
 // transaction handle with a previously instantiated WrapType variable. This
 // allows transactions to manage multiples tables and facilitates error
 // handling.
-func ExampleDbMapType_03() {
+func ExampleDscType_03() {
 	type authorType struct {
 		ID   int64  `db_primary:"*" db_table:"author"`
 		Name string `db:"*"`
@@ -178,10 +178,10 @@ func ExampleDbMapType_03() {
 	// William Faulkner / The Bear
 }
 
-// This example demonstrates using dbmap functions directly. The need to check
-// errors and manage statements in more detail results in much more code than
-// when the wrapped functions are used.
-func ExampleDbMapType_04() {
+// This example demonstrates, ill-advisedly, the direct use of DscType
+// functions. The need to check errors and manage statements in more detail
+// results in much more code than when the wrapped functions are used.
+func ExampleDscType_04() {
 	var hnd *sql.DB
 	var err error
 	os.Remove(dbFileStr)
@@ -255,7 +255,7 @@ func ExampleDbMapType_04() {
 
 // This example is the bad code emporium, full of calls to exercise errant code
 // paths to increase test coverage.
-func ExampleDbMapType_05() {
+func ExampleDscType_05() {
 	var hnd *sql.DB
 	var db dbmap.WrapType
 	var rec recType
