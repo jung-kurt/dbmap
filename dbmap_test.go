@@ -71,6 +71,7 @@ func ExampleDscType_02() {
 	var hnd *sql.DB
 	var err error
 	var j int64
+	dbFileStr := "data/02.db"
 	os.Remove(dbFileStr)
 	hnd, err = sql.Open("sqlite3", dbFileStr)
 	if err == nil {
@@ -97,6 +98,16 @@ func ExampleDscType_02() {
 		for db.Next() {
 			fmt.Printf("Got [%04d][%s]\n", rec.Num, rec.Str)
 		}
+		db.QueryRow(&rec, "WHERE num = ?", 4198)
+		if db.OK() {
+			fmt.Printf("Got [%04d][%s]\n", rec.Num, rec.Str)
+		}
+		db.TransactionBegin()
+		db.QueryRow(&rec, "WHERE num = ?", 4199)
+		if db.OK() {
+			fmt.Printf("Got [%04d][%s]\n", rec.Num, rec.Str)
+		}
+		db.TransactionEnd()
 		hnd.Close()
 		err = db.Err()
 	}
@@ -108,6 +119,8 @@ func ExampleDscType_02() {
 	// Got [4152][*PJwbEyUPk33FwwnWLOLZfw==*]
 	// Got [4154][*vZ83nzcp7LwW1F/Rm3km9w==*]
 	// Got [4155][SiIpgI5rXRYy1RAjJBd7xw==]
+	// Got [4198][gxAIo+DBmOT9eld3PLgi3Q==]
+	// Got [4199][NGNAARg6cmq9n5rf2RoV1Q==]
 }
 
 // This example demonstrates creating and selecting from a view. Note that

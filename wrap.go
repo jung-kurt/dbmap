@@ -238,6 +238,30 @@ func (w *WrapType) Delete(tailStr string, args ...interface{}) {
 
 // Query submits a SELECT command to the database. recPtr must be a pointer to
 // a properly tagged structure variable. tailStr contains the portion of the
+// SELECT command that filters and orders the results. tailStr should be
+// constructed so that at most one row is returned. This may involve including
+// a LIMIT clause in it. For each question mark in tailStr, there must be an
+// appropriate parameter in the args list. This command is self-contained; it
+// is an error to use it in conjunction with Next().
+func (w *WrapType) QueryRow(recPtr interface{}, tailStr string, args ...interface{}) {
+	if w.sharePtr.errVal == nil {
+		var fldList []interface{}
+		fldList, w.sharePtr.errVal = w.dsc.SelectArg(recPtr)
+		if w.sharePtr.errVal == nil {
+			cmdStr := w.dsc.SelectStr(tailStr)
+			var row *sql.Row
+			if w.sharePtr.tx == nil {
+				row = w.sharePtr.hnd.QueryRow(cmdStr, args...)
+			} else {
+				row = w.sharePtr.tx.QueryRow(cmdStr, args...)
+			}
+			w.sharePtr.errVal = row.Scan(fldList...)
+		}
+	}
+}
+
+// Query submits a SELECT command to the database. recPtr must be a pointer to
+// a properly tagged structure variable. tailStr contains the portion of the
 // SELECT command that filters and orders the results. For each question mark
 // in tailStr, there must be an appropriate parameter in the args list. If
 // tailStr is empty and args not passed, all records in the table will be
