@@ -98,7 +98,7 @@ asterisk, the field name itself will be used.
 
 A field with an optional "db_index" tag will be indexed. The form of this tag
 is a comma-separated list of key segments. Each key segment is made of a name
-portion and an integer sequence. For example `db_index="name1, num2" indicates
+portion and an integer sequence. For example `db_index:"name1, num2" indicates
 that the tagged field will be the first field in the index named 'name', and
 the second field in the index named 'num'. Even if a field is the only member
 of an index, it requires an integer suffix. The integer sequences for segments
