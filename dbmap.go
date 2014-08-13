@@ -3,14 +3,11 @@ package dbmap
 import (
 	"errors"
 	"fmt"
-	// "os"
 	"reflect"
+	"regexp"
+	"sort"
 	"strings"
 )
-
-// func outf(fmtStr string, args ...interface{}) {
-// 	fmt.Fprintf(os.Stderr, fmtStr, args...)
-// }
 
 type tmType map[string]string
 
@@ -42,8 +39,22 @@ type idxType struct {
 
 type idxListType []idxType
 
+type idxMapType map[string]idxListType
+
 func (list *idxListType) append(nameStr, fldStr string) {
 	*list = append(*list, idxType{nameStr, fldStr})
+}
+
+func (list idxListType) Len() int {
+	return len(list)
+}
+
+func (list idxListType) Less(i, j int) bool {
+	return list[i].nameStr < list[j].nameStr
+}
+
+func (list idxListType) Swap(i, j int) {
+	list[i], list[j] = list[j], list[i]
 }
 
 type strListType []string
@@ -93,7 +104,7 @@ type DscType struct {
 		// "num int32, name string, ..."
 		nameTypeStr string
 		// {{"fooID", "rowid"}, {"fooName", "Name"}, {"fooNum", "Num"}, ...}
-		idxList idxListType
+		idxMap idxMapType
 	}
 	insert struct {
 		// "num, name, ..."
@@ -114,6 +125,31 @@ type DscType struct {
 	}
 }
 
+var glIdxRe = regexp.MustCompile("^\\s*(\\D{1,})(\\S{1,})\\s*$")
+
+// Tokenize index tag and store for later sorting and assembling
+func processIndex(tagStr, fldStr string, idxMap map[string]idxListType) (err error) {
+	// tagStr looks like ``, `db_index:"name1"` or `db_index:"loc5 name2"
+	if len(tagStr) > 0 {
+		var segList, pairList []string
+		var sortStr string
+		segList = strings.Split(tagStr, ",")
+		for _, str := range segList {
+			if err == nil {
+				pairList = glIdxRe.FindStringSubmatch(str)
+				if pairList != nil {
+					sortStr = pairList[1]
+					idxMap[sortStr] = append(idxMap[sortStr],
+						idxType{nameStr: pairList[2], fldStr: fldStr})
+				} else {
+					err = fmt.Errorf("malformed index tag: %s", str)
+				}
+			}
+		}
+	}
+	return
+}
+
 // describe collects meta information, for example field types and SQL
 // names, from the passed-in record.
 func describe(recTp reflect.Type) (dsc DscType, err error) {
@@ -130,20 +166,13 @@ func describe(recTp reflect.Type) (dsc DscType, err error) {
 		var primaryStr, sqlStr, tblStr, typeStr string
 		var fldTp reflect.Type
 		var selList, qmList, createList strListType
+		dsc.create.idxMap = make(idxMapType)
 		dsc.nameMap = make(map[string]reflect.StructField)
 		for j := 0; j < recTp.NumField(); j++ {
 			sfList.append(recTp.Field(j))
 		}
-		var indexed bool
 		for _, sf := range sfList {
 			if err == nil {
-				indexed = len(sf.Tag.Get("db_index")) > 0
-				// Note on indexes. In the future, if this package gains support for
-				// multi-field indexes, the db_index tag can have strings such as "a+01",
-				// "a-02", etc. Here, "a" will be the index, the sort order of the key
-				// segment will be specified by "-" (descending) or "+" (ascending) and
-				// the significance of the key will be determined by sorting the following
-				// text (here, "01" and "02", but any text could be used).
 				fldTp = sf.Type
 				sqlStr = sf.Tag.Get("db")
 				if len(sqlStr) > 0 {
@@ -155,15 +184,15 @@ func describe(recTp reflect.Type) (dsc DscType, err error) {
 					if typeOk {
 						dsc.nameMap[sqlStr] = sf
 						createList.appendf("%s %s", sqlStr, typeStr)
-						if indexed {
-							dsc.create.idxList.append(sf.Name, sqlStr)
+						err = processIndex(sf.Tag.Get("db_index"), sf.Name, dsc.create.idxMap)
+						if err == nil {
+							dsc.insert.sfList.append(sf)
+							dsc.insert.nameList.append(sqlStr)
+							qmList.append("?")
+							dsc.sel.typeStrList.append(typeStr)
+							selList.append(sqlStr)
+							dsc.sel.sfList.append(sf)
 						}
-						dsc.insert.sfList.append(sf)
-						dsc.insert.nameList.append(sqlStr)
-						qmList.append("?")
-						dsc.sel.typeStrList.append(typeStr)
-						selList.append(sqlStr)
-						dsc.sel.sfList.append(sf)
 					} else {
 						errorf("database does not support fields of type %s", fldTp.String())
 					}
@@ -206,6 +235,10 @@ func describe(recTp reflect.Type) (dsc DscType, err error) {
 				dsc.insert.qmStr = qmList.join()
 				dsc.insert.nameStr = dsc.insert.nameList.join()
 				dsc.create.nameTypeStr = createList.join()
+				for _, v := range dsc.create.idxMap {
+					sort.Sort(v)
+					// fmt.Printf("%s %v\n", k, v)
+				}
 				dsc.sel.nameStr = selList.join()
 				// dump(dsc)
 			}
@@ -257,9 +290,13 @@ func (dsc DscType) SelectArg(recPtr interface{}) (argList []interface{}, err err
 // that is associated with the receiver.
 func (dsc DscType) CreateStr() (createStr string, idxStrList []string) {
 	createStr = fmt.Sprintf("CREATE TABLE %s (%s);", dsc.tblStr, dsc.create.nameTypeStr)
-	for j, idx := range dsc.create.idxList {
-		idxStrList = append(idxStrList, fmt.Sprintf("CREATE INDEX %s_idx_%d ON %s (%s)",
-			dsc.tblStr, j+1, dsc.tblStr, idx.fldStr))
+	for k, v := range dsc.create.idxMap {
+		var list strListType
+		for _, idx := range v {
+			list.append(idx.fldStr)
+		}
+		idxStrList = append(idxStrList, fmt.Sprintf("CREATE INDEX %s_%s ON %s (%s)",
+			dsc.tblStr, k, dsc.tblStr, list.join()))
 	}
 	return
 }

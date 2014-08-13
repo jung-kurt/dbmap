@@ -15,8 +15,8 @@ const dbFileStr = "data/example.db"
 
 type recType struct {
 	ID  int64  `db_primary:"*" db_table:"rec"`
-	Str string `db:"*" db_index:"*"`
-	Num int64  `db:"num" db_index:"*"`
+	Str string `db:"*" db_index:"str1, num2"`
+	Num int64  `db:"num" db_index:"num1, str2"`
 }
 
 var glRecDsc = dbmap.MustDescribe(recType{})
@@ -36,7 +36,7 @@ func hashStr(v int64) string {
 func ExampleDscType_01() {
 	type recType struct {
 		ID   int64  `db_primary:"*" db_table:"rec"`
-		Name string `db:"*" db_index:"*"`
+		Name string `db:"*" db_index:"name1"`
 	}
 	os.Remove(dbFileStr)
 	hnd, err := sql.Open("sqlite3", dbFileStr)

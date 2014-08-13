@@ -96,8 +96,14 @@ If a managed field does not have a "db_primary" tag, it must have a "db" tag
 that identifies the column name used in the database. If the tag value is an
 asterisk, the field name itself will be used.
 
-A field with an optional "db_index" tag will be indexed. Currently only single
-field indexes are supported.
+A field with an optional "db_index" tag will be indexed. The form of this tag
+is a comma-separated list of key segments. Each key segment is made of a name
+portion and an integer sequence. For example `db_index="name1, num2" indicates
+that the tagged field will be the first field in the index named 'name', and
+the second field in the index named 'num'. Even if a field is the only member
+of an index, it requires an integer suffix. The integer sequences for segments
+within a given key do not necessarily need to be sequential but they should not
+be duplicated.
 
 Limitations
 
