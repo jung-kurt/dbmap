@@ -15,7 +15,7 @@ const dbFileStr = "data/example.db"
 
 type recType struct {
 	ID  int64  `db_primary:"*" db_table:"rec"`
-	Str string `db:"*" db_index:"str1, num2"`
+	Str string `db:"str" db_index:"str1, num2"`
 	Num int64  `db:"num" db_index:"num1, str2"`
 }
 
@@ -90,7 +90,7 @@ func ExampleDscType_02() {
 		db.Query(&rec, "WHERE num > ? AND num < ?", 4151, 4155)
 		for db.Next() {
 			rec.Str = "*" + rec.Str + "*"
-			db.Update(rec, "Str")
+			db.Update(rec, "str")
 		}
 		db.TransactionEnd()
 		db.Delete("WHERE num = ?", 4153)
@@ -324,6 +324,11 @@ func ExampleDscType_05() {
 	}
 	describe("f", fType{})
 	describe("g", describe)
+	type hType struct {
+		A int64 `db_table:"test" db_primary:"*"`
+		B int64 `db:"*" db_index:"b"`
+	}
+	describe("h", hType{})
 	db = glRecDsc.Wrap(nil)
 	os.Remove(dbFileStr)
 	hnd, err = sql.Open("sqlite3", dbFileStr)
@@ -357,6 +362,10 @@ func ExampleDscType_05() {
 		db.Update(&updRec, "Str")
 		db.Update(updRec, "*")
 		db.Update(updRec)
+		_ = glRecDsc.UpdateStr()
+		_ = glRecDsc.UpdateStr("*")
+		_, _ = glRecDsc.UpdateArg(&updRec)
+		db.ClearError()
 		db.SetErrorf("keyboard missing, press Escape to continue")
 		db.SetError(db.Err())
 		db.ClearError()
@@ -386,6 +395,7 @@ func ExampleDscType_05() {
 	// e multiple occurrence of "db_primary" tag
 	// f multiple occurrence of "db_table" tag
 	// g specified address must be of structure with one or more fields that have a "db" tag
+	// h malformed index tag: b
 	// dbmap, dbmap/wrap, true, true
 	// true
 	// nested transactions not supported

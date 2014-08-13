@@ -41,10 +41,6 @@ type idxListType []idxType
 
 type idxMapType map[string]idxListType
 
-func (list *idxListType) append(nameStr, fldStr string) {
-	*list = append(*list, idxType{nameStr, fldStr})
-}
-
 func (list idxListType) Len() int {
 	return len(list)
 }
@@ -125,7 +121,7 @@ type DscType struct {
 	}
 }
 
-var glIdxRe = regexp.MustCompile("^\\s*(\\D{1,})(\\S{1,})\\s*$")
+var glIdxRe = regexp.MustCompile("^\\s*(\\D{1,})(\\d{1,})\\s*$")
 
 // Tokenize index tag and store for later sorting and assembling
 func processIndex(tagStr, fldStr string, idxMap map[string]idxListType) (err error) {
@@ -184,7 +180,7 @@ func describe(recTp reflect.Type) (dsc DscType, err error) {
 					if typeOk {
 						dsc.nameMap[sqlStr] = sf
 						createList.appendf("%s %s", sqlStr, typeStr)
-						err = processIndex(sf.Tag.Get("db_index"), sf.Name, dsc.create.idxMap)
+						err = processIndex(sf.Tag.Get("db_index"), sqlStr, dsc.create.idxMap)
 						if err == nil {
 							dsc.insert.sfList.append(sf)
 							dsc.insert.nameList.append(sqlStr)
