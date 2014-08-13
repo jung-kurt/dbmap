@@ -179,7 +179,7 @@ func (w *WrapType) Insert(recPtr interface{}) {
 	w.insertOrReplace(recPtr, false)
 }
 
-// Insert adds the record pointed to by recPtr to the database. If the
+// InsertOrReplace adds the record pointed to by recPtr to the database. If the
 // insertion would violate a unique constraint on the table, the record will be
 // replaced. If the record structure contains an ID field tagged with
 // db_primary, this field will be assigned an identifier by the database.
@@ -246,8 +246,8 @@ func (w *WrapType) Delete(tailStr string, args ...interface{}) {
 	}
 }
 
-// Query submits a SELECT command to the database. recPtr must be a pointer to
-// a properly tagged structure variable. tailStr contains the portion of the
+// QueryRow submits a SELECT command to the database. recPtr must be a pointer
+// to a properly tagged structure variable. tailStr contains the portion of the
 // SELECT command that filters and orders the results. tailStr should be
 // constructed so that at most one row is returned. This may involve including
 // a LIMIT clause in it. For each question mark in tailStr, there must be an
