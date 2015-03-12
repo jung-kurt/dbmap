@@ -1,12 +1,12 @@
 package dbmap_test
 
 import (
-	"code.google.com/p/dbmap"
 	_ "code.google.com/p/go-sqlite/go1/sqlite3"
 	"crypto/md5"
 	"database/sql"
 	"encoding/base64"
 	"fmt"
+	"github.com/jung-kurt/dbmap"
 	"os"
 	"strings"
 )
